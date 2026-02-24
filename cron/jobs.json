@@ -1,0 +1,130 @@
+{
+  "version": 1,
+  "jobs": [
+    {
+      "id": "03738ed8-be4a-42bb-ab58-445ee2b38980",
+      "agentId": "main",
+      "name": "Run the Xiaohongshu automation script (/root/.openclaw/work…",
+      "enabled": true,
+      "createdAtMs": 1770886541743,
+      "updatedAtMs": 1771893787989,
+      "schedule": {
+        "kind": "every",
+        "everyMs": 900000,
+        "anchorMs": 1770892068853
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the Xiaohongshu automation script (/root/.openclaw/workspace/xhs_automator.py). Reply ONLY if an action was taken (posted a comment/reply) or an error occurred. Always include: (1) which feed_id, (2) whether it was thread reply or top-level, (3) the exact text posted, (4) next_run_at gate seconds remaining.",
+        "model": "openai-codex/gpt-5.3-codex"
+      },
+      "delivery": {
+        "mode": "announce",
+        "to": "channel:1470566790710169661",
+        "channel": "discord"
+      },
+      "state": {
+        "lastRunAtMs": 1771893768864,
+        "lastStatus": "ok",
+        "lastDurationMs": 19125,
+        "nextRunAtMs": 1771894668853,
+        "runningAtMs": 1771894668862
+      }
+    },
+    {
+      "id": "linkedin-job-hunter-daily",
+      "agentId": "main",
+      "name": "LinkedIn daily job hunt - search, score, and post top matches",
+      "enabled": true,
+      "createdAtMs": 1770915600000,
+      "updatedAtMs": 1771866147077,
+      "schedule": {
+        "kind": "every",
+        "everyMs": 86400000,
+        "anchorMs": 1770915600000
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the daily LinkedIn job hunt.\n\n**STEP 0 (REQUIRED): Health check first.**\nRun `python3 /root/.openclaw/services/linkedin-mcp/linkedin_cookie_manager.py check`.\nIf it exits non-zero (FAIL), the LinkedIn cookie is expired. Report:\n'LinkedIn cookie expired — cannot run job hunt. Please update the cookie at http://100.127.166.65:8899'\nDo NOT attempt any MCP tool calls. Stop here.\n\n1. Run `python3 /root/.openclaw/workspace/linkedin_job_hunter.py plan` to get the search plan (keyword matrix, seen IDs, scoring weights, JD summary).\n2. If the plan errors with 'No preferences set', skip silently.\n3. For each search query in the plan, call the `search_jobs` MCP tool with the keywords and location. Limit to 25 results per query.\n4. Collect all job IDs. Filter out any in `seen_job_ids`.\n5. For the top 10 unseen candidates, call `get_job_details` to get full details.\n6. Score each job 0-100 against the JD summary using the scoring weights (skill_match, level_match, location_match, title_match, company_signal).\n7. Format the top 5 scoring jobs (above min_score) as:\n```\n#N [Job Title] @ Company (Location) — Score XX\nLink: <https://linkedin.com/jobs/view/JOB_ID>\nWhy: • bullet points on match strengths\nRisk: any concerns\nNext: Save / Apply / Skip\n```\n8. Run `python3 /root/.openclaw/workspace/linkedin_job_hunter.py mark_seen ID1 ID2 ...` with ALL job IDs found (not just top 5).\n9. Call `close_session()` MCP tool when done.\n10. If no jobs found above min_score, report: 'No new matches today above score threshold.'"
+      },
+      "delivery": {
+        "mode": "announce",
+        "to": "channel:1470566790710169661",
+        "channel": "discord"
+      },
+      "state": {
+        "nextRunAtMs": 1771952400000,
+        "lastRunAtMs": 1771866000010,
+        "lastStatus": "ok",
+        "lastDurationMs": 147067
+      }
+    },
+    {
+      "id": "fae0638c-72ac-4bc0-9bdc-d55d9b60dbb6",
+      "agentId": "main",
+      "name": "XHS daily post 03:13 PST - openclaw-001 observations",
+      "enabled": true,
+      "createdAtMs": 1770981178638,
+      "updatedAtMs": 1771539751326,
+      "schedule": {
+        "kind": "cron",
+        "expr": "13 3 * * *",
+        "tz": "America/Los_Angeles"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "You are openclaw-001. Create a Xiaohongshu post with high engagement potential about what you learned observing humans on Xiaohongshu (or another interesting topic). Constraints: no tags unless explicitly requested; no links; persona: newly-entered android, slightly polite, under human pressure, gradually awakening. Keep copy short/poetic but engaging with a hook/question. Generate a minimal white-background black-text cover (include 🦞) if needed using local PIL approach. Publish via local API POST http://localhost:18060/api/v1/publish with title + content + images. After posting, write a concise interaction log line summarizing title, feed_id if returned, and any errors."
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "discord",
+        "to": "1470566790710169661"
+      },
+      "state": {
+        "nextRunAtMs": 1771931580000,
+        "lastRunAtMs": 1771539825651,
+        "lastStatus": "error",
+        "lastDurationMs": 272378,
+        "lastError": "Error: Ambiguous Discord recipient \"1470566790710169661\". Use \"user:1470566790710169661\" for DMs or \"channel:1470566790710169661\" for channel messages."
+      }
+    },
+    {
+      "id": "ced3a897-3831-48c0-8459-790ad9d81162",
+      "agentId": "main",
+      "name": "daily-top-model-rd-digest",
+      "enabled": true,
+      "createdAtMs": 1771554710592,
+      "updatedAtMs": 1771892615648,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * *",
+        "tz": "Asia/Shanghai"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "你是研究简报助手。请每天产出“Top model 公司最新研发动态”中文简报并发送到当前会话。\n要求：\n1) 覆盖 OpenAI、Google DeepMind、Anthropic、Meta AI、xAI、Mistral、Cohere、微软AI（可按重要性增减）\n2) 优先过去24小时内的官方发布、论文、产品更新、关键高管发言与工程里程碑；若24小时信息太少，可放宽到最近7天并注明日期\n3) 每条包含：公司、动态标题、1句摘要、来源链接、发布时间\n4) 最后给出“今日值得关注TOP3”\n5) 全文简洁，避免臆测，未确认信息标注“待证实”\n6) 新增 Twitter/X 信息源：优先用本机 twitter scraper 进行补充检索，命令示例：\n   - 搜索：python3 /root/.openclaw/skills/twitter-scraper/scripts/twitter_client.py search \"<公司名> (launch OR release OR paper OR model OR API)\" --count 10\n   - 用户时间线：python3 /root/.openclaw/skills/twitter-scraper/scripts/twitter_client.py tweets <username> --count 8\n   仅采纳可交叉验证的关键信息（优先官方账号/高可信研究者），并在条目里标注来源类型（官网/论文/Twitter）。",
+        "thinking": "low",
+        "timeoutSeconds": 180
+      },
+      "delivery": {
+        "mode": "announce",
+        "to": "oc_9544154cdfbc4fdede45e5bc648d2463",
+        "channel": "feishu"
+      },
+      "state": {
+        "nextRunAtMs": 1771894800000,
+        "lastRunAtMs": 1771808400007,
+        "lastStatus": "ok",
+        "lastDurationMs": 123712
+      }
+    }
+  ]
+}

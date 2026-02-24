@@ -1,0 +1,48 @@
+# Credentials, secrets & auth
+credentials/
+identity/
+exec-approvals.json
+
+# Main config (contains Discord tokens, gateway auth, API keys)
+openclaw.json
+openclaw.json.bak*
+
+# Agent sessions & auth profiles (contain API tokens + conversation logs)
+agents/*/sessions/
+agents/*/agent/auth-profiles.json
+
+# Service runtime data, cookies & compose files (contain embedded secrets)
+services/*/data/
+services/*/docker-compose.yml
+services/twitter/cookies.json
+services/xiaohongshu-mcp/images/
+
+# Workspace & memory (may contain sensitive context)
+workspace/
+workspace-*/
+memory/
+browser/
+canvas/
+completions/
+devices/
+extensions/
+media/
+
+# Runtime files
+*.log
+*.pid
+*.json.bak
+gateway.nohup.log
+gateway-start.sh
+update-check.json
+cron/runs/
+subagents/runs.json
+scripts/xhs_history.json
+
+# Build artifacts & binaries
+*.tar.gz
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
