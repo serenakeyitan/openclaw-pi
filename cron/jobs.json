@@ -7,7 +7,7 @@
       "name": "Run the Xiaohongshu automation script (/root/.openclaw/work…",
       "enabled": true,
       "createdAtMs": 1770886541743,
-      "updatedAtMs": 1771893787989,
+      "updatedAtMs": 1772085492151,
       "schedule": {
         "kind": "every",
         "everyMs": 900000,
@@ -26,11 +26,10 @@
         "channel": "discord"
       },
       "state": {
-        "lastRunAtMs": 1771893768864,
+        "lastRunAtMs": 1772085468865,
         "lastStatus": "ok",
-        "lastDurationMs": 19125,
-        "nextRunAtMs": 1771894668853,
-        "runningAtMs": 1771894668862
+        "lastDurationMs": 23286,
+        "nextRunAtMs": 1772086368853
       }
     },
     {
@@ -39,7 +38,7 @@
       "name": "LinkedIn daily job hunt - search, score, and post top matches",
       "enabled": true,
       "createdAtMs": 1770915600000,
-      "updatedAtMs": 1771866147077,
+      "updatedAtMs": 1772038891146,
       "schedule": {
         "kind": "every",
         "everyMs": 86400000,
@@ -57,10 +56,10 @@
         "channel": "discord"
       },
       "state": {
-        "nextRunAtMs": 1771952400000,
-        "lastRunAtMs": 1771866000010,
+        "nextRunAtMs": 1772125200000,
+        "lastRunAtMs": 1772038800015,
         "lastStatus": "ok",
-        "lastDurationMs": 147067
+        "lastDurationMs": 91131
       }
     },
     {
@@ -87,7 +86,7 @@
         "to": "1470566790710169661"
       },
       "state": {
-        "nextRunAtMs": 1771931580000,
+        "nextRunAtMs": 1772104380000,
         "lastRunAtMs": 1771539825651,
         "lastStatus": "error",
         "lastDurationMs": 272378,
@@ -100,7 +99,7 @@
       "name": "daily-top-model-rd-digest",
       "enabled": true,
       "createdAtMs": 1771554710592,
-      "updatedAtMs": 1771892615648,
+      "updatedAtMs": 1772067716029,
       "schedule": {
         "kind": "cron",
         "expr": "0 9 * * *",
@@ -120,10 +119,87 @@
         "channel": "feishu"
       },
       "state": {
-        "nextRunAtMs": 1771894800000,
-        "lastRunAtMs": 1771808400007,
+        "nextRunAtMs": 1772154000000,
+        "lastRunAtMs": 1772067600044,
         "lastStatus": "ok",
-        "lastDurationMs": 123712
+        "lastDurationMs": 115985
+      }
+    },
+    {
+      "id": "a232f6bd-b560-4cf9-8e49-30635caef65e",
+      "agentId": "main",
+      "name": "Kael GA Daily Report (09:30 Beijing)",
+      "enabled": true,
+      "createdAtMs": 1772072585248,
+      "updatedAtMs": 1772072585248,
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 9 * * *",
+        "tz": "Asia/Shanghai"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Generate and send today's Kael GA daily report to Feishu group chat oc_9544154cdfbc4fdede45e5bc648d2463.\n\nSteps:\n1) Run: /root/.openclaw/skills/ga4/.venv/bin/python3 /root/.openclaw/workspace/kael_ga_daily_report.py\n2) Parse the JSON stdout fields: message, image_path.\n3) Send message text first, then send image to Feishu using message tool to target chat:oc_9544154cdfbc4fdede45e5bc648d2463.\n4) Use bullet points and keep TL;DR at top (the script already formats this).\n5) If GA query fails, send a short failure note to the same chat with likely cause."
+      },
+      "delivery": {
+        "mode": "none"
+      },
+      "state": {
+        "nextRunAtMs": 1772155800000
+      }
+    },
+    {
+      "id": "ops-standup-morning",
+      "agentId": "main",
+      "name": "Ops standup morning - DM team members for daily updates",
+      "enabled": true,
+      "createdAtMs": 1772150400000,
+      "updatedAtMs": 1772150400000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * 1-5",
+        "tz": "Asia/Shanghai"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the ops standup morning reminder.\n\n1. Check calendar:\n   Run `python3 /root/.openclaw/skills/ops-standup/scripts/feishu_calendar_check.py`\n   If exit code 1, skip silently — no standup today.\n\n2. Initialize today's state (if not already active):\n   Run `python3 /root/.openclaw/skills/ops-standup/scripts/parse_standup_reply.py --status`\n   If no active standup for today, run `python3 /root/.openclaw/skills/ops-standup/scripts/parse_standup_reply.py --reset-day`\n   If already active (members may have submitted early), keep existing state.\n\n3. Read the current state again. For each member who has NOT yet replied (replied=false), send a Feishu DM reminder:\n   ```\n   openclaw message send --channel feishu --account main --target user:<open_id> --message \"早上好！请回复今天的工作内容和进展，如果发了社交媒体帖子请附链接。10:00 会汇总发到群里 📋\"\n   ```\n   Skip members who already replied — they submitted early, no need to remind.\n\n4. Do NOT wait for replies. Replies are handled in real-time by the agent.\n\n5. Report nothing (delivery mode none). Only report errors if any step fails.",
+        "timeoutSeconds": 120
+      },
+      "delivery": {
+        "mode": "none"
+      },
+      "state": {
+        "nextRunAtMs": 1772154000000
+      }
+    },
+    {
+      "id": "ops-standup-summary",
+      "agentId": "main",
+      "name": "Ops standup summary - refresh traction + post summary to group",
+      "enabled": true,
+      "createdAtMs": 1772150400000,
+      "updatedAtMs": 1772150400000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 10 * * 1-5",
+        "tz": "Asia/Shanghai"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Run the ops standup 10:00 summary.\n\n1. Check if today has an active standup:\n   Run `python3 /root/.openclaw/skills/ops-standup/scripts/parse_standup_reply.py --status`\n   If no active standup, skip silently.\n\n2. Refresh engagement data for recent posts:\n   Run `python3 /root/.openclaw/skills/ops-standup/scripts/generate_summary.py --urls-to-refresh`\n   For each URL returned, use WebFetch to get the page and extract engagement metrics.\n   Platform-specific extraction:\n   - XHS: likes (点赞), comments (评论), favorites (收藏)\n   - Twitter/X: likes, retweets, replies, views\n   - Reddit: upvotes, comment count\n   - TikTok: views, likes, comments, shares\n   - YouTube: views, likes, comments\n   - LinkedIn: likes, comments\n   For each URL with new metrics, run:\n   `python3 /root/.openclaw/skills/ops-standup/scripts/parse_standup_reply.py --update-metrics --url \"URL\" --metrics '{\"views\": N, \"likes\": N, \"comments\": N, \"shares\": N, \"updated_at\": \"HH:MM\"}'`\n   If WebFetch fails for a URL, skip it (leave metrics as-is).\n\n3. Generate and send summary card to group:\n   Run `python3 /root/.openclaw/skills/ops-standup/scripts/generate_summary.py --send-chat oc_9544154cdfbc4fdede45e5bc648d2463`\n   This sends a Feishu interactive card directly.\n\n4. If sending fails, report the error.",
+        "timeoutSeconds": 300
+      },
+      "delivery": {
+        "mode": "none"
+      },
+      "state": {
+        "nextRunAtMs": 1772157600000
       }
     }
   ]
