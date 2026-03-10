@@ -1,0 +1,16 @@
+[
+  {
+    "id": "fiverr-ai-freelancing",
+    "title": "Fiverr AI Freelancing",
+    "title_zh": "Fiverr AI 接单赚钱",
+    "emoji": "🖥️",
+    "summary": "Use AI to take on freelance gigs (writing, translation, coding, design) on Fiverr and earn USD",
+    "summary_zh": "用 AI 在 Fiverr 上接单（写作、翻译、编程、设计），赚美金",
+    "guide_file": "fiverr-ai-freelancing.md",
+    "xhs_post_date": "2026-03-09",
+    "tags": ["freelancing", "fiverr", "ai-tools", "writing", "coding"],
+    "difficulty": "beginner",
+    "earning_potential": "$500-3000/month",
+    "startup_cost": "$0"
+  }
+]
