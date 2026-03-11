@@ -25,11 +25,10 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, Container
 from textual.widgets import Static, Input, DataTable, RichLog
 from textual.binding import Binding
+from textual.design import ColorSystem
 from textual import work
 from rich.text import Text
 
-from candlestick_chart import Candle, Chart as CandleChart
-from rich.ansi import AnsiDecoder
 
 from strategy_manager import StrategyManager
 
@@ -87,6 +86,16 @@ def fmt(v):
 
 def fmt_pct(v):
     return f"{float(v)*100:+.2f}%"
+
+def fmt_option_symbol(sym):
+    """Parse OCC option symbol like QQQ260331P00450000 into 'QQQ $450P 3/31'."""
+    m = re.match(r'^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$', sym)
+    if not m:
+        return sym
+    underlying, yy, mm, dd, cp, strike_raw = m.groups()
+    strike = int(strike_raw) / 1000
+    strike_str = f"${strike:g}"
+    return f"{underlying} {strike_str}{cp} {int(mm)}/{int(dd)}"
 
 def delta_arrow(v):
     v = float(v)
@@ -372,7 +381,6 @@ Screen { background: #000000; color: #c8d6e5; scrollbar-size: 0 0; }
 #watchlist-pane { width: 1fr; background: #000000; border-right: solid #1a2332; }
 #positions-pane { width: 1fr; background: #000000; }
 
-#chart-pane { height: 1fr; min-height: 8; background: #000000; }
 #chart-display { height: 1fr; background: #000000; padding: 0 0; }
 
 #strat-area { height: auto; min-height: 4; max-height: 10; }
@@ -390,6 +398,7 @@ Screen { background: #000000; color: #c8d6e5; scrollbar-size: 0 0; }
 DataTable { height: 1fr; background: #000000; }
 DataTable > .datatable--header { background: #111111; color: #00d4aa; text-style: bold; }
 DataTable > .datatable--cursor { background: #0a1a2a; }
+DataTable:focus > .datatable--cursor { background: #112233; }
 #watch-table { height: auto; max-height: 12; }
 
 RichLog { height: 1fr; background: #000000; padding: 0 1; scrollbar-size: 1 1; }
@@ -405,6 +414,26 @@ RichLog { height: 1fr; background: #000000; padding: 0 1; scrollbar-size: 1 1; }
 class TradingTerminal(App):
     CSS = CSS
     TITLE = "OpenClaw Terminal"
+    DARK = True
+
+    # Override design to prevent cursor from forcing text color
+    design = {
+        "dark": ColorSystem(
+            primary="#00d4aa",
+            background="#000000",
+            surface="#000000",
+            foreground="#c8d6e5",
+            dark=True,
+            variables={
+                "block-cursor-background": "#112233",
+                "block-cursor-foreground": "#c8d6e5",
+                "block-cursor-blurred-background": "#0a1a2a",
+                "block-cursor-blurred-foreground": "#c8d6e5",
+                "block-cursor-text-style": "none",
+                "block-cursor-blurred-text-style": "none",
+            },
+        ),
+    }
 
     BINDINGS = [
         Binding("q", "quit", "Quit", show=True),
@@ -422,8 +451,6 @@ class TradingTerminal(App):
         self.prev_prices = {}
         self.last_order_ids = set()
         self.tick_count = 0
-        self.selected_symbol = self.watchlist[0] if self.watchlist else "NVDA"
-        self.bars_cache = {}  # symbol -> list of Candle
         self.mini_bars = {}   # symbol -> list of {open,close,high,low} for sparklines
         self._shutting_down = False
 
@@ -438,10 +465,6 @@ class TradingTerminal(App):
             with Vertical(id="positions-pane"):
                 yield Static(" POSITIONS", classes="pane-title")
                 yield DataTable(id="pos-table")
-
-        with Vertical(id="chart-pane"):
-            yield Static(" CANDLESTICK", classes="pane-title", id="chart-title")
-            yield Static("Select a symbol...", id="chart-display")
 
         with Horizontal(id="strat-area"):
             with Vertical(id="strat-left"):
@@ -492,8 +515,7 @@ class TradingTerminal(App):
         self.set_interval(5, self.poll_orders)
         self.set_interval(10, self.refresh_strategies)
         self.set_interval(3, self.update_clock)
-        self.set_interval(15, self.refresh_chart)
-        self.refresh_chart()
+        self.set_interval(30, self.refresh_chart)
 
     def update_clock(self):
         if self._shutting_down: return
@@ -507,7 +529,7 @@ class TradingTerminal(App):
         active = sum(1 for s in self.sm.strategies.values() if s.status == "active")
         total = len(self.sm.strategies)
         self.query_one("#title-bar", Static).update(
-            f" OPENCLAW TERMINAL  │  {now} {dot}  │  Market {mkt}  │  "
+            f" OPENCLAW TERMINAL  │  {now} {dot}  │  Stock Market {mkt}  │  "
             f"Strategies {active}/{total}  │  Press [bold]/[/] command"
         )
         self.query_one("#status-line", Static).update(
@@ -618,62 +640,47 @@ class TradingTerminal(App):
 
     def _render_prices(self, rows):
         wt = self.query_one("#watch-table", DataTable)
-        wt.clear()
+        # Build new row data first
+        new_rows = []
         for idx, sym, price, chg, bid, ask, hist in rows:
             trend = spark_trend(self.mini_bars.get(sym, []))
             if price is None:
-                wt.add_row(Text(str(idx), style="dim"), Text(sym, style="bold"),
-                           *[Text("---", style="dim")]*4, trend)
+                new_rows.append((Text(str(idx), style="dim"), Text(sym, style="bold"),
+                           *[Text("---", style="dim")]*4, trend))
                 continue
             if chg > 0.001: ps, cs = "bold #00d4aa", "#00d4aa"
             elif chg < -0.001: ps, cs = "bold #ff6b6b", "#ff6b6b"
             else: ps, cs = "bold white", "dim"
 
             arr = delta_arrow(chg)
-            sel = "▸ " if sym == self.selected_symbol else "  "
 
-            wt.add_row(
-                Text(f"{sel}{idx}", style="dim"),
+            new_rows.append((
+                Text(f"  {idx}", style="dim"),
                 Text(sym, style="bold white"),
                 Text(fmt(price), style=ps),
                 Text(f"{arr}{chg*100:+.2f}%", style=cs),
                 Text(fmt(bid), style="cyan") if bid else Text("---", style="dim"),
                 Text(fmt(ask), style="cyan") if ask else Text("---", style="dim"),
                 trend,
-            )
+            ))
+        # Swap in one go — minimal blank time
+        wt.clear()
+        for r in new_rows:
+            wt.add_row(*r)
 
-    def on_data_table_row_selected(self, event: DataTable.RowSelected):
-        """When a watchlist row is clicked, update the big chart."""
-        if event.data_table.id != "watch-table":
-            return
-        try:
-            row_cells = event.data_table.get_row(event.row_key)
-            sym_text = row_cells[1]
-            sym = sym_text.plain.strip() if hasattr(sym_text, "plain") else str(sym_text).strip()
-            if sym and sym != "---":
-                self.selected_symbol = sym
-                # Only refresh the big chart, don't re-render the table
-                if sym in self.bars_cache:
-                    self._render_chart(sym, self.bars_cache[sym])
-                else:
-                    self.refresh_chart()
-        except Exception:
-            pass
-
-    # ── Candlestick chart ──────────────────────────────────
+    # ── Bars fetch (for sparklines) ─────────────────────────
 
     @work(thread=True)
     def refresh_chart(self):
         if self._shutting_down: return
-        self._fetch_bars(self.selected_symbol)
+        self._fetch_bars()
 
-    def _fetch_bars(self, symbol):
+    def _fetch_bars(self):
         try:
             from datetime import timedelta
             end = datetime.now()
             start = end - timedelta(days=30)
 
-            # Fetch bars for ALL watchlist + position symbols in one call
             pos_syms = set()
             try:
                 for p in self.api.list_positions():
@@ -681,13 +688,12 @@ class TradingTerminal(App):
                         pos_syms.add(p.symbol)
             except Exception:
                 pass
-            # Only include equity-like symbols (skip crypto, options)
             all_syms = []
             for s in set(self.watchlist) | pos_syms | set(self.mini_bars.keys()):
                 if s.isalpha() and len(s) <= 5:
                     all_syms.append(s)
-            if symbol not in all_syms:
-                all_syms.append(symbol)
+            if not all_syms:
+                return
 
             bars_df = self.api.get_bars(
                 all_syms,
@@ -700,7 +706,6 @@ class TradingTerminal(App):
             if bars_df.empty:
                 return
 
-            # Parse per-symbol bars
             mini = {}
             for sym in all_syms:
                 try:
@@ -718,68 +723,15 @@ class TradingTerminal(App):
                             "high": float(r["high"]),
                             "low": float(r["low"]),
                         })
-                    mini[sym] = ohlc[-14:]  # last 14 for sparklines
-
-                    # Build Candle objects for the big chart
-                    candles = [Candle(open=b["open"], close=b["close"],
-                                     high=b["high"], low=b["low"]) for b in ohlc]
-                    self.bars_cache[sym] = candles
+                    mini[sym] = ohlc[-14:]
                 except Exception:
                     pass
 
             self.mini_bars = mini
-
-            # Re-render tables so sparklines appear
             self.app.call_from_thread(self.refresh_prices)
             self.app.call_from_thread(self.refresh_positions)
-
-            # Render the big chart for the selected symbol
-            if symbol in self.bars_cache:
-                self.app.call_from_thread(
-                    self._render_chart, symbol, self.bars_cache[symbol]
-                )
-        except Exception as e:
-            self.app.call_from_thread(
-                self._render_chart_error, symbol, str(e)
-            )
-
-    def _render_chart(self, symbol, candles):
-        if not candles:
-            return
-        try:
-            chart_widget = self.query_one("#chart-display", Static)
-            # Get approximate pane size, use sensible defaults
-            w = chart_widget.size.width
-            h = chart_widget.size.height
-            if w < 20:
-                w = 50
-            if h < 5:
-                h = 12
-            chart = CandleChart(candles, width=w, height=h)
-            chart.set_name(f"{symbol} (30D)")
-            chart.set_bear_color(234, 74, 90)
-            chart.set_bull_color(52, 208, 88)
-            chart.set_volume_pane_enabled(False)
-            rendered = chart._render()
-            # Convert ANSI escape codes to Rich Text for Textual
-            decoder = AnsiDecoder()
-            lines = rendered.split("\n")
-            from rich.text import Text as RText
-            result = RText()
-            for i, line in enumerate(lines):
-                if i > 0:
-                    result.append("\n")
-                result.append_text(decoder.decode_line(line))
-            chart_widget.update(result)
-            self.query_one("#chart-title", Static).update(f" {symbol} CANDLESTICK (30D)")
-        except Exception as e:
-            chart_widget = self.query_one("#chart-display", Static)
-            chart_widget.update(f"Chart error: {e}")
-            self._log(f"[red]Chart render error: {e}[/]")
-
-    def _render_chart_error(self, symbol, error):
-        chart_widget = self.query_one("#chart-display", Static)
-        chart_widget.update(f"[red]Chart error for {symbol}: {error}[/]")
+        except Exception:
+            pass
 
     def _fetch_positions(self):
         try:
@@ -810,11 +762,12 @@ class TradingTerminal(App):
 
     def _render_positions(self, rows):
         pt = self.query_one("#pos-table", DataTable)
-        pt.clear()
         if not rows:
+            pt.clear()
             pt.add_row(Text("No positions", style="dim"), *[Text("")]*7)
             return
 
+        new_rows = []
         total_val = total_pnl = 0
         for p in rows:
             pnl = p["pnl"]
@@ -824,8 +777,9 @@ class TradingTerminal(App):
             c = "#00d4aa" if pnl >= 0 else "#ff6b6b"
             s = "+" if pnl >= 0 else ""
             a = delta_arrow(pnl)
-            pt.add_row(
-                Text(p["symbol"], style="bold white"),
+            display_sym = fmt_option_symbol(p["symbol"])
+            new_rows.append((
+                Text(display_sym, style="bold white"),
                 Text(f"{p['qty']:g}"),
                 Text(fmt(p["entry"]), style="dim"),
                 Text(fmt(p["price"]), style="bold white"),
@@ -833,15 +787,18 @@ class TradingTerminal(App):
                 Text(f"{a}{s}{fmt(pnl)}", style=c),
                 Text(f"{s}{pnl_pct:.2f}%", style=c),
                 spark_trend(self.mini_bars.get(p["symbol"], [])),
-            )
+            ))
         tc = "#00d4aa" if total_pnl >= 0 else "#ff6b6b"
         ts = "+" if total_pnl >= 0 else ""
-        pt.add_row(
+        new_rows.append((
             Text("TOTAL", style="bold"), Text(""), Text(""), Text(""),
             Text(fmt(total_val), style="bold white"),
             Text(f"{ts}{fmt(total_pnl)}", style=f"bold {tc}"),
             Text(""), Text(""),
-        )
+        ))
+        pt.clear()
+        for r in new_rows:
+            pt.add_row(*r)
 
     def _fetch_strategies(self):
         # Reload from disk in case bot updated it
@@ -864,7 +821,7 @@ class TradingTerminal(App):
         st = self.query_one("#strat-table", DataTable)
         st.clear()
         if not strategies:
-            st.add_row(Text("No strategies. Use: strat add <type> <name> <symbol>", style="dim"),
+            st.add_row(Text("No strategies. Use main terminal to add — they will show up here.", style="dim"),
                         *[Text("")]*9)
             return
 
