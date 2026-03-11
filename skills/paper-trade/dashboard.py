@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -102,6 +103,258 @@ STATUS_STYLES = {
     "error": ("X ERROR", "#ff6b6b"),
 }
 
+# ── Intent Parser ────────────────────────────────────────
+
+# Symbol extraction: 1-5 uppercase alpha chars, or preceded by "of"/"on"/"for"
+_SYM_RE = r'(?:of|on|for)?\s*\$?([A-Za-z]{1,5})\b'
+# Quantity: bare number, or "N shares", or "$N worth"
+_QTY_NUM = r'(\d+(?:\.\d+)?)'
+_QTY_SHARES = r'(\d+(?:\.\d+)?)\s*(?:shares?|units?|contracts?|lots?)'
+_QTY_DOLLAR = r'\$\s*(\d+(?:\.\d+)?)\s*(?:worth|of)?'
+
+# Stop words that are not symbols
+_STOP_WORDS = {
+    "buy", "sell", "close", "cancel", "watch", "add", "remove", "drop",
+    "get", "grab", "pick", "long", "short", "all", "my", "the", "some",
+    "put", "market", "limit", "order", "orders", "position", "positions",
+    "portfolio", "strat", "strategy", "pause", "resume", "stop", "start",
+    "run", "grid", "dca", "momentum", "mean", "reversion", "from", "to",
+    "of", "on", "for", "in", "at", "with", "and", "shares", "share",
+    "stock", "stocks", "worth", "up", "set", "show", "list", "refresh",
+    "tick", "quit", "exit", "watchlist", "capital", "every", "min",
+    "minutes", "sec", "seconds", "new", "create", "delete", "back",
+    "purchase", "acquire", "dump", "offload", "unload", "liquidate",
+    "flatten", "out", "everything", "please", "now", "it", "this",
+    "that", "just", "also", "lets", "let", "can", "you", "i", "me",
+    "nvidia", "apple", "tesla", "google", "amazon", "microsoft", "meta",
+}
+
+# Common name -> ticker mapping
+_TICKER_ALIASES = {
+    "nvidia": "NVDA", "apple": "AAPL", "tesla": "TSLA", "google": "GOOGL",
+    "alphabet": "GOOGL", "amazon": "AMZN", "microsoft": "MSFT", "meta": "META",
+    "facebook": "META", "netflix": "NFLX", "amd": "AMD", "intel": "INTC",
+    "spy": "SPY", "qqq": "QQQ", "arkk": "ARKK", "coinbase": "COIN",
+    "palantir": "PLTR", "disney": "DIS", "uber": "UBER", "snap": "SNAP",
+    "shopify": "SHOP", "roku": "ROKU", "square": "SQ", "block": "SQ",
+    "paypal": "PYPL", "boeing": "BA", "jpmorgan": "JPM", "goldman": "GS",
+    "berkshire": "BRK.B", "visa": "V", "mastercard": "MA",
+}
+
+def _extract_symbol(text):
+    """Extract a ticker symbol from natural language text."""
+    words = text.lower().split()
+    # First check for company name aliases
+    for word in words:
+        if word in _TICKER_ALIASES:
+            return _TICKER_ALIASES[word]
+    # Then look for uppercase tickers in original text
+    for word in text.split():
+        clean = word.strip("$,.!?")
+        if clean.isalpha() and 1 <= len(clean) <= 5 and clean.upper() == clean and clean.lower() not in _STOP_WORDS:
+            return clean.upper()
+    # Then look for any word that could be a ticker (not a stop word)
+    for word in words:
+        clean = word.strip("$,.!?")
+        if clean.isalpha() and 1 <= len(clean) <= 5 and clean not in _STOP_WORDS:
+            return clean.upper()
+    return None
+
+def _extract_quantity(text):
+    """Extract quantity from text. Returns (qty, is_dollar_amount)."""
+    # Dollar amount: "$500 of", "$500 worth"
+    m = re.search(r'\$\s*(\d+(?:\.\d+)?)', text)
+    if m:
+        return float(m.group(1)), True
+    # "N shares" / "N units"
+    m = re.search(r'(\d+(?:\.\d+)?)\s*(?:shares?|units?|lots?)', text, re.I)
+    if m:
+        return float(m.group(1)), False
+    # Bare number (not part of a ticker)
+    tokens = text.split()
+    for t in tokens:
+        t = t.strip("$,")
+        if re.match(r'^\d+(\.\d+)?$', t):
+            return float(t), False
+    return None, False
+
+def _extract_strategy_name(text, known_names=None):
+    """Extract a strategy name from text."""
+    if known_names:
+        for name in known_names:
+            if name.lower() in text.lower():
+                return name
+    # Look for quoted names
+    m = re.search(r'["\']([^"\']+)["\']', text)
+    if m:
+        return m.group(1)
+    # Look for a hyphenated word (common strategy name pattern like "my-grid")
+    m = re.search(r'\b([a-z][\w-]*-[\w-]+)\b', text, re.I)
+    if m and m.group(1).lower() not in _STOP_WORDS:
+        return m.group(1)
+    return None
+
+def parse_intent(cmd, known_strategy_names=None):
+    """
+    Parse a natural language command into an intent dict.
+    Returns: {"action": str, "symbol": str|None, "qty": float|None,
+              "dollar_amt": float|None, "strategy_name": str|None,
+              "strategy_type": str|None, "capital": float|None,
+              "raw_args": list, "raw": str}
+    """
+    raw = cmd.strip()
+    lower = raw.lower()
+    words = lower.split()
+
+    result = {
+        "action": None, "symbol": None, "qty": None, "dollar_amt": None,
+        "strategy_name": None, "strategy_type": None, "capital": None,
+        "raw_args": raw.split()[1:] if raw.split() else [],
+        "raw": raw,
+    }
+
+    # ── Quit / Refresh ──
+    if lower in ("q", "quit", "exit", "/quit", "/exit", "bye", "done"):
+        result["action"] = "quit"
+        return result
+    if lower in ("r", "refresh", "update", "reload"):
+        result["action"] = "refresh"
+        return result
+    if lower in ("tick", "run tick", "run strategies", "tick all"):
+        result["action"] = "tick"
+        return result
+
+    # ── Buy intent ──
+    buy_pat = r'\b(buy|purchase|acquire|get|grab|pick\s*up|go\s*long|long)\b'
+    if re.search(buy_pat, lower):
+        result["action"] = "buy"
+        result["symbol"] = _extract_symbol(raw)
+        qty, is_dollar = _extract_quantity(raw)
+        if is_dollar:
+            result["dollar_amt"] = qty
+        else:
+            result["qty"] = qty
+        return result
+
+    # ── Sell intent ──
+    sell_pat = r'\b(sell|dump|offload|unload|short|go\s*short)\b'
+    if re.search(sell_pat, lower):
+        result["action"] = "sell"
+        result["symbol"] = _extract_symbol(raw)
+        qty, is_dollar = _extract_quantity(raw)
+        if is_dollar:
+            result["dollar_amt"] = qty
+        else:
+            result["qty"] = qty
+        return result
+
+    # ── Close intent ──
+    close_pat = r'\b(close|liquidate|flatten|exit\s*position|close\s*out)\b'
+    if re.search(close_pat, lower):
+        result["action"] = "close"
+        if re.search(r'\b(all|everything|every)\b', lower):
+            result["symbol"] = "ALL"
+        else:
+            result["symbol"] = _extract_symbol(raw)
+        return result
+
+    # ── Cancel intent ──
+    cancel_pat = r'\b(cancel|revoke|kill|scratch)\b'
+    if re.search(cancel_pat, lower):
+        result["action"] = "cancel"
+        if re.search(r'\b(all|everything|every)\b', lower):
+            result["symbol"] = "ALL"
+        else:
+            # Look for order ID (hex-like or uuid-like)
+            m = re.search(r'([0-9a-f]{8,})', lower)
+            if m:
+                result["strategy_name"] = m.group(1)  # reuse field for order_id
+            else:
+                result["symbol"] = _extract_symbol(raw)
+        return result
+
+    # ── Watch intent ──
+    watch_add = r'\b(watch|track|monitor|add\s*to\s*watch|follow)\b'
+    watch_rm = r'\b(unwatch|untrack|stop\s*watch)\b|remove\b.*\bwatch|drop\b.*\bwatch'
+    if re.search(watch_rm, lower):
+        result["action"] = "unwatch"
+        result["symbol"] = _extract_symbol(raw)
+        return result
+    if re.search(watch_add, lower):
+        result["action"] = "watch"
+        result["symbol"] = _extract_symbol(raw)
+        return result
+
+    # ── Strategy intents ──
+    strat_add = r'\b(create|add|new|set\s*up|launch|deploy|start)\s*(a\s+)?(strategy|strat|grid|dca|momentum|mean.?rev)'
+    strat_rm = r'\b(remove|delete|destroy|kill)\s*(strategy|strat)'
+    strat_pause = r'\b(pause|halt|freeze|disable)\s*(strategy|strat)?'
+    strat_resume = r'\b(resume|unpause|enable|restart|reactivate)\s*(strategy|strat)?'
+    strat_stop = r'\b(stop)\s*(strategy|strat|all\s*strat)'
+    strat_list = r'\b(list|show|display)\s*(strateg\w*|strats?)\b'
+
+    if re.search(strat_add, lower):
+        result["action"] = "strat_add"
+        # Detect type
+        for stype in ("grid", "dca", "momentum", "mean_reversion", "mean reversion"):
+            if stype in lower:
+                result["strategy_type"] = stype.replace(" ", "_")
+                break
+        result["strategy_name"] = _extract_strategy_name(raw, known_strategy_names)
+        result["symbol"] = _extract_symbol(raw)
+        # Capital
+        m = re.search(r'(?:capital|budget|with)\s*\$?\s*(\d+(?:\.\d+)?)', lower)
+        if m:
+            result["capital"] = float(m.group(1))
+        return result
+
+    if re.search(strat_rm, lower):
+        result["action"] = "strat_remove"
+        result["strategy_name"] = _extract_strategy_name(raw, known_strategy_names)
+        return result
+
+    if re.search(strat_pause, lower):
+        result["action"] = "strat_pause"
+        result["strategy_name"] = _extract_strategy_name(raw, known_strategy_names)
+        return result
+
+    if re.search(strat_resume, lower):
+        result["action"] = "strat_resume"
+        result["strategy_name"] = _extract_strategy_name(raw, known_strategy_names)
+        return result
+
+    if re.search(strat_stop, lower):
+        result["action"] = "strat_pause"
+        result["strategy_name"] = _extract_strategy_name(raw, known_strategy_names)
+        return result
+
+    if re.search(strat_list, lower):
+        result["action"] = "strat_list"
+        return result
+
+    # ── Show/display intents ──
+    if re.search(r'\b(show|display|list)\s*(positions?|portfolio|holdings?)\b', lower):
+        result["action"] = "refresh"
+        return result
+    if re.search(r'\b(show|display|list)\s*(orders?)\b', lower):
+        result["action"] = "refresh"
+        return result
+
+    # ── Fallback: try first word as legacy command ──
+    if words:
+        first = words[0]
+        if first in ("buy", "sell", "close", "cancel", "watch", "strat", "tick"):
+            result["action"] = first
+            result["symbol"] = _extract_symbol(" ".join(words[1:])) if len(words) > 1 else None
+            qty, is_dollar = _extract_quantity(raw)
+            if is_dollar:
+                result["dollar_amt"] = qty
+            else:
+                result["qty"] = qty
+            return result
+
+    return result  # action=None means unrecognized
+
 # ── CSS ───────────────────────────────────────────────────
 
 CSS = """
@@ -172,6 +425,7 @@ class TradingTerminal(App):
         self.selected_symbol = self.watchlist[0] if self.watchlist else "NVDA"
         self.bars_cache = {}  # symbol -> list of Candle
         self.mini_bars = {}   # symbol -> list of {open,close,high,low} for sparklines
+        self._shutting_down = False
 
     def compose(self) -> ComposeResult:
         yield Static("", id="title-bar")
@@ -204,7 +458,7 @@ class TradingTerminal(App):
         yield Static("", id="status-line")
         with Container(id="command-bar"):
             yield Input(
-                placeholder=" strat add grid my-grid NVDA | strat pause X | buy AAPL 10 | sell TSLA | close all",
+                placeholder=" Press / to type  |  buy/sell NVDA 10  |  close all  |  watch apple  |  /exit or /quit to quit",
                 id="cmd-input"
             )
 
@@ -232,16 +486,17 @@ class TradingTerminal(App):
         self._log("Terminal started")
         self.refresh_all()
 
-        self.set_interval(5, self.refresh_prices)
-        self.set_interval(10, self.refresh_account)
-        self.set_interval(10, self.refresh_positions)
-        self.set_interval(8, self.poll_orders)
-        self.set_interval(15, self.refresh_strategies)
-        self.set_interval(1, self.update_clock)
-        self.set_interval(30, self.refresh_chart)
+        self.set_interval(2, self.refresh_prices)
+        self.set_interval(5, self.refresh_account)
+        self.set_interval(5, self.refresh_positions)
+        self.set_interval(5, self.poll_orders)
+        self.set_interval(10, self.refresh_strategies)
+        self.set_interval(3, self.update_clock)
+        self.set_interval(15, self.refresh_chart)
         self.refresh_chart()
 
     def update_clock(self):
+        if self._shutting_down: return
         now = datetime.now().strftime("%H:%M:%S")
         dot = "●" if self.tick_count % 2 == 0 else "○"
         try:
@@ -266,6 +521,7 @@ class TradingTerminal(App):
 
     @work(thread=True)
     def refresh_all(self):
+        if self._shutting_down: return
         self._fetch_account()
         self._fetch_prices()
         self._fetch_positions()
@@ -274,23 +530,28 @@ class TradingTerminal(App):
 
     @work(thread=True)
     def refresh_prices(self):
+        if self._shutting_down: return
         self._fetch_prices()
 
     @work(thread=True)
     def refresh_account(self):
+        if self._shutting_down: return
         self._fetch_account()
 
     @work(thread=True)
     def refresh_positions(self):
+        if self._shutting_down: return
         self._fetch_positions()
 
     @work(thread=True)
     def poll_orders(self):
+        if self._shutting_down: return
         self._poll_new_fills()
         self._fetch_orders()
 
     @work(thread=True)
     def refresh_strategies(self):
+        if self._shutting_down: return
         self._fetch_strategies()
 
     def _fetch_account(self):
@@ -403,6 +664,7 @@ class TradingTerminal(App):
 
     @work(thread=True)
     def refresh_chart(self):
+        if self._shutting_down: return
         self._fetch_bars(self.selected_symbol)
 
     def _fetch_bars(self, symbol):
@@ -757,33 +1019,145 @@ class TradingTerminal(App):
         if not cmd:
             return
 
-        parts = cmd.split()
-        action = parts[0].lower()
         ts = datetime.now().strftime("%H:%M:%S")
+        known_strats = list(self.sm.strategies.keys()) if hasattr(self, 'sm') else []
+        intent = parse_intent(cmd, known_strats)
+        action = intent["action"]
 
         try:
-            if action == "strat":
-                self._do_strat(parts[1:], ts)
-            elif action == "buy":
-                self._do_buy(parts[1:], ts)
-            elif action == "sell":
-                self._do_sell(parts[1:], ts)
-            elif action == "close":
-                self._do_close(parts[1:], ts)
-            elif action == "cancel":
-                self._do_cancel(parts[1:], ts)
-            elif action == "watch":
-                self._do_watch(parts[1:], ts)
+            if action == "quit":
+                self._shutting_down = True
+                self.workers.cancel_all()
+                self.exit()
+            elif action == "refresh":
+                self.action_refresh()
             elif action == "tick":
                 self._do_tick(ts)
-            elif action in ("q", "quit", "exit"):
-                self.exit()
-            elif action in ("r", "refresh"):
-                self.action_refresh()
+            elif action == "buy":
+                self._intent_buy(intent, ts)
+            elif action == "sell":
+                self._intent_sell(intent, ts)
+            elif action == "close":
+                self._intent_close(intent, ts)
+            elif action == "cancel":
+                self._intent_cancel(intent, ts)
+            elif action == "watch":
+                self._intent_watch(intent, ts, add=True)
+            elif action == "unwatch":
+                self._intent_watch(intent, ts, add=False)
+            elif action == "strat_add":
+                self._intent_strat_add(intent, ts)
+            elif action == "strat_remove":
+                self._intent_strat_action(intent, ts, "remove")
+            elif action == "strat_pause":
+                self._intent_strat_action(intent, ts, "pause")
+            elif action == "strat_resume":
+                self._intent_strat_action(intent, ts, "resume")
+            elif action == "strat_list":
+                self._do_strat(["list"], ts)
+            elif action == "strat":
+                # Legacy fallback for "strat add grid ..."
+                self._do_strat(cmd.split()[1:], ts)
+            elif action is None:
+                self._log(f"[dim]{ts}[/]  [red]Unknown: {cmd}[/]")
             else:
                 self._log(f"[dim]{ts}[/]  [red]Unknown: {cmd}[/]")
         except Exception as e:
             self._log(f"[dim]{ts}[/]  [red]Error: {e}[/]")
+
+    # ── Intent handlers ──────────────────────────────────
+
+    def _intent_buy(self, intent, ts):
+        sym = intent["symbol"]
+        if not sym:
+            self._log(f"[dim]{ts}[/]  [yellow]What do you want to buy? e.g. \"buy 10 NVDA\" or \"buy $500 of apple\"[/]")
+            return
+        if intent["dollar_amt"]:
+            # Dollar-based buy: fetch price, compute qty
+            self._dollar_buy_async(sym, intent["dollar_amt"], ts)
+        else:
+            qty = intent["qty"] or 1
+            self._log(f"[dim]{ts}[/]  [#00d4aa]> BUY[/] [bold]{sym}[/] x{qty}")
+            self._submit_async({"symbol": sym, "qty": qty, "side": "buy", "type": "market", "time_in_force": "day"}, ts)
+
+    @work(thread=True)
+    def _dollar_buy_async(self, sym, amount, ts):
+        try:
+            quote = self.api.get_latest_quote(sym)
+            price = float(quote.ap) if quote.ap else float(quote.bp)
+            qty = int(amount / price)
+            if qty < 1:
+                self.app.call_from_thread(self._log, f"[dim]{ts}[/]  [red]${amount} not enough for 1 share of {sym} @ ${price:.2f}[/]")
+                return
+            self.app.call_from_thread(self._log, f"[dim]{ts}[/]  [#00d4aa]> BUY[/] [bold]{sym}[/] x{qty} (~${amount:.0f} @ ${price:.2f})")
+            order = self.api.submit_order(symbol=sym, qty=qty, side="buy", type="market", time_in_force="day")
+            self.app.call_from_thread(self._log, f"[dim]{ts}[/]  [#00d4aa]OK BUY[/] {order.symbol} | [dim]{order.id[:8]}[/]")
+            self.app.call_from_thread(self.refresh_all)
+        except Exception as e:
+            self.app.call_from_thread(self._log, f"[dim]{ts}[/]  [red]ERR {e}[/]")
+
+    def _intent_sell(self, intent, ts):
+        sym = intent["symbol"]
+        if not sym:
+            self._log(f"[dim]{ts}[/]  [yellow]What do you want to sell? e.g. \"sell TSLA\" or \"sell 5 shares of nvidia\"[/]")
+            return
+        args = [sym]
+        if intent["qty"]:
+            args.append(str(intent["qty"]))
+        self._do_sell(args, ts)
+
+    def _intent_close(self, intent, ts):
+        sym = intent["symbol"]
+        if not sym:
+            self._log(f"[dim]{ts}[/]  [yellow]Close what? e.g. \"close NVDA\" or \"close all positions\"[/]")
+            return
+        self._do_close(["all" if sym == "ALL" else sym], ts)
+
+    def _intent_cancel(self, intent, ts):
+        if intent["symbol"] == "ALL":
+            self._do_cancel(["all"], ts)
+        elif intent["strategy_name"]:
+            # Order ID was stored in strategy_name field
+            self._do_cancel([intent["strategy_name"]], ts)
+        else:
+            self._log(f"[dim]{ts}[/]  [yellow]Cancel what? e.g. \"cancel all\" or \"cancel ORDER_ID\"[/]")
+
+    def _intent_watch(self, intent, ts, add=True):
+        sym = intent["symbol"]
+        if not sym:
+            self._log(f"[dim]{ts}[/]  [yellow]Which symbol? e.g. \"watch nvidia\" or \"remove TSLA from watchlist\"[/]")
+            return
+        prefix = "+" if add else "-"
+        self._do_watch([f"{prefix}{sym}"], ts)
+
+    def _intent_strat_add(self, intent, ts):
+        stype = intent["strategy_type"]
+        name = intent["strategy_name"]
+        sym = intent["symbol"]
+        if not stype:
+            self._log(f"[dim]{ts}[/]  [yellow]What type? e.g. \"create a grid strategy on NVDA\" (grid/dca/momentum/mean_reversion)[/]")
+            return
+        if not sym:
+            self._log(f"[dim]{ts}[/]  [yellow]Which symbol? e.g. \"add grid strategy my-grid on NVDA\"[/]")
+            return
+        if not name:
+            name = f"{stype}-{sym.lower()}"
+        capital = intent["capital"] or 10000
+        args = ["add", stype, name, sym]
+        if intent["capital"]:
+            args.append(str(int(capital)))
+        self._do_strat(args, ts)
+
+    def _intent_strat_action(self, intent, ts, action):
+        name = intent["strategy_name"]
+        if not name:
+            names = list(self.sm.strategies.keys())
+            if names:
+                self._log(f"[dim]{ts}[/]  [yellow]Which strategy? Known: {', '.join(names)}[/]")
+            else:
+                self._log(f"[dim]{ts}[/]  [yellow]No strategies found[/]")
+            return
+        self._do_strat([action, name], ts)
 
     # ── Strategy commands ─────────────────────────────────
 
