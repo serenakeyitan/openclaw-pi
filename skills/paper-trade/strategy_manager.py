@@ -19,6 +19,7 @@ from strategies.grid import GridStrategy
 from strategies.dca import DCAStrategy
 from strategies.momentum import MomentumStrategy
 from strategies.mean_reversion import MeanReversionStrategy
+from strategies.dip_buyer import DipBuyerStrategy
 
 STATE_PATH = Path(__file__).parent / "strategies_state.json"
 LOG_PATH = Path(__file__).parent / "strategy_manager.log"
@@ -29,6 +30,7 @@ STRATEGY_REGISTRY = {
     "dca": DCAStrategy,
     "momentum": MomentumStrategy,
     "mean_reversion": MeanReversionStrategy,
+    "dip_buyer": DipBuyerStrategy,
 }
 
 
@@ -168,9 +170,24 @@ class StrategyManager:
                     if strategy.status == "error":
                         _log(f"Strategy {name} failed to initialize: {strategy.error_msg}")
                     else:
+                        if not strategy.started_at:
+                            strategy.started_at = datetime.now(timezone.utc).isoformat()
                         _log(f"Strategy {name} initialized -> {strategy.status}")
 
                 elif strategy.status == "active":
+                    # Check duration limit
+                    if strategy.duration_minutes > 0 and strategy.started_at:
+                        try:
+                            started = datetime.fromisoformat(strategy.started_at)
+                            if started.tzinfo is None:
+                                started = started.replace(tzinfo=timezone.utc)
+                            elapsed = (datetime.now(timezone.utc) - started).total_seconds() / 60
+                            if elapsed >= strategy.duration_minutes:
+                                strategy.status = "paused"
+                                _log(f"Strategy {name} expired after {strategy.duration_minutes}m -> paused")
+                                continue
+                        except (ValueError, TypeError):
+                            pass
                     strategy.tick(api)
 
                 # paused, stopped, error -> skip

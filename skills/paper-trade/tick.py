@@ -29,17 +29,22 @@ def get_api():
 def main():
     api = get_api()
 
-    # Check market open
+    sm = StrategyManager()
+
+    # Check market open (but allow crypto strategies to run 24/7)
     try:
         clock = api.get_clock()
-        if not clock.is_open:
-            print(f"[{datetime.now()}] Market closed. Skipping.")
+        has_crypto = any(
+            "/" in s.config.get("symbol", "")
+            for s in sm.strategies.values()
+            if s.status in ("active", "pending")
+        )
+        if not clock.is_open and not has_crypto:
+            print(f"[{datetime.now()}] Market closed, no crypto strategies. Skipping.")
             return
     except Exception as e:
         print(f"[{datetime.now()}] Clock error: {e}")
         return
-
-    sm = StrategyManager()
     active = sum(1 for s in sm.strategies.values() if s.status in ("active", "pending"))
     print(f"[{datetime.now()}] Tick: {active} active strategies")
     sm.tick_all(api)

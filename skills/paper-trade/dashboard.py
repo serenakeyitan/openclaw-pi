@@ -153,19 +153,26 @@ _TICKER_ALIASES = {
 def _extract_symbol(text):
     """Extract a ticker symbol from natural language text."""
     words = text.lower().split()
-    # First check for company name aliases
+    # First check for crypto pairs like BTC/USD, ETH/USD
+    for word in text.split():
+        clean = word.strip("$,.!?")
+        if "/" in clean and len(clean) <= 10:
+            parts = clean.split("/")
+            if all(p.isalpha() for p in parts):
+                return clean.upper()
+    # Then check for company name aliases
     for word in words:
         if word in _TICKER_ALIASES:
             return _TICKER_ALIASES[word]
     # Then look for uppercase tickers in original text
     for word in text.split():
         clean = word.strip("$,.!?")
-        if clean.isalpha() and 1 <= len(clean) <= 8 and clean.upper() == clean and clean.lower() not in _STOP_WORDS:
+        if clean.isalpha() and 2 <= len(clean) <= 8 and clean.upper() == clean and clean.lower() not in _STOP_WORDS:
             return clean.upper()
     # Then look for any word that could be a ticker (not a stop word)
     for word in words:
         clean = word.strip("$,.!?")
-        if clean.isalpha() and 1 <= len(clean) <= 8 and clean not in _STOP_WORDS:
+        if clean.isalpha() and 2 <= len(clean) <= 8 and clean not in _STOP_WORDS:
             return clean.upper()
     return None
 
@@ -233,6 +240,18 @@ def parse_intent(cmd, known_strategy_names=None):
         result["action"] = "tick"
         return result
 
+    # ── Auto-tick ──
+    if re.match(r'^auto\b', lower) or re.match(r'^/auto\b', lower):
+        result["action"] = "auto"
+        # Parse "auto off", "auto on", "auto 5", "auto on 5"
+        m = re.search(r'\b(on|off|start|stop)\b', lower)
+        if m:
+            result["strategy_name"] = m.group(1)  # reuse field for on/off
+        m = re.search(r'(\d+)', lower)
+        if m:
+            result["qty"] = float(m.group(1))  # reuse field for interval
+        return result
+
     # ── Buy intent ──
     buy_pat = r'\b(buy|purchase|acquire|get|grab|pick\s*up|go\s*long|long)\b'
     if re.search(buy_pat, lower):
@@ -295,7 +314,7 @@ def parse_intent(cmd, known_strategy_names=None):
         return result
 
     # ── Strategy intents ──
-    strat_add = r'\b(create|add|new|set\s*up|launch|deploy|start)\s*(a\s+)?(strategy|strat|grid|dca|momentum|mean.?rev)'
+    strat_add = r'\b(create|add|new|set\s*up|launch|deploy|start)\s*(a\s+)?(strategy|strat|grid|dca|momentum|mean.?rev|dip.?buy|long.?only)'
     strat_rm = r'\b(remove|delete|destroy|kill)\s*(strategy|strat)'
     strat_pause = r'\b(pause|halt|freeze|disable)\s*(strategy|strat)?'
     strat_resume = r'\b(resume|unpause|enable|restart|reactivate)\s*(strategy|strat)?'
@@ -305,7 +324,7 @@ def parse_intent(cmd, known_strategy_names=None):
     if re.search(strat_add, lower):
         result["action"] = "strat_add"
         # Detect type
-        for stype in ("grid", "dca", "momentum", "mean_reversion", "mean reversion"):
+        for stype in ("grid", "dca", "momentum", "mean_reversion", "mean reversion", "dip_buyer", "dip buyer", "dip", "long_only", "long only"):
             if stype in lower:
                 result["strategy_type"] = stype.replace(" ", "_")
                 break
@@ -453,6 +472,10 @@ class TradingTerminal(App):
         self.tick_count = 0
         self.mini_bars = {}   # symbol -> list of {open,close,high,low} for sparklines
         self._shutting_down = False
+        self.auto_tick = False
+        self.auto_tick_interval = 10  # seconds
+        self._tick_running = False
+        self._last_auto_tick = None
 
     def compose(self) -> ComposeResult:
         yield Static("", id="title-bar")
@@ -516,6 +539,28 @@ class TradingTerminal(App):
         self.set_interval(10, self.refresh_strategies)
         self.set_interval(3, self.update_clock)
         self.set_interval(30, self.refresh_chart)
+        self.set_interval(1, self._auto_tick_check)
+
+    def _auto_tick_check(self):
+        if not self.auto_tick or self._shutting_down or self._tick_running:
+            return
+        now = datetime.now()
+        if self._last_auto_tick and (now - self._last_auto_tick).total_seconds() < self.auto_tick_interval:
+            return
+        self._last_auto_tick = now
+        self._tick_running = True
+        self._run_auto_tick()
+
+    @work(thread=True)
+    def _run_auto_tick(self):
+        try:
+            self.sm.tick_all(self.api)
+            self.app.call_from_thread(self.refresh_all)
+        except Exception as e:
+            ts = datetime.now().strftime("%m/%d %H:%M:%S")
+            self.app.call_from_thread(self._log, f"[dim]{ts}[/]  [red]Auto-tick error: {e}[/]")
+        finally:
+            self._tick_running = False
 
     def update_clock(self):
         if self._shutting_down: return
@@ -528,9 +573,10 @@ class TradingTerminal(App):
             mkt = "?"
         active = sum(1 for s in self.sm.strategies.values() if s.status == "active")
         total = len(self.sm.strategies)
+        auto = f"  │  [green]AUTO {self.auto_tick_interval}s[/]" if self.auto_tick else ""
         self.query_one("#title-bar", Static).update(
             f" OPENCLAW TERMINAL  │  {now} {dot}  │  Stock Market {mkt}  │  "
-            f"Strategies {active}/{total}  │  Press [bold]/[/] command"
+            f"Strategies {active}/{total}{auto}  │  Press [bold]/[/] command"
         )
         self.query_one("#status-line", Static).update(
             f" q Quit  r Refresh  / Command  │  "
@@ -1002,6 +1048,8 @@ class TradingTerminal(App):
                 self.action_refresh()
             elif action == "tick":
                 self._do_tick(ts)
+            elif action == "auto":
+                self._do_auto(intent, ts)
             elif action == "buy":
                 self._intent_buy(intent, ts)
             elif action == "sell":
@@ -1157,8 +1205,12 @@ class TradingTerminal(App):
                 capital = float(args[-1]) if args[-1].replace('.','').isdigit() else 10000
             elif stype == "mean_reversion":
                 config = {"symbol": symbol, "window": 20, "threshold_pct": 2.0, "qty": 5}
+            elif stype in ("dip_buyer", "dip", "long_only"):
+                stype = "dip_buyer"
+                config = {"symbol": symbol, "window": 20, "dip_pct": 1.0,
+                          "buy_amount": 100, "max_buys": 10, "cooldown_seconds": 60}
             else:
-                self._log(f"[dim]{ts}[/]  [red]Unknown type: {stype}. Use: grid, dca, momentum, mean_reversion[/]")
+                self._log(f"[dim]{ts}[/]  [red]Unknown type: {stype}. Use: grid, dca, momentum, mean_reversion, dip_buyer[/]")
                 return
 
             self.sm.add_strategy(stype, name, config, capital)
@@ -1207,6 +1259,30 @@ class TradingTerminal(App):
             self.app.call_from_thread(self.refresh_all)
         except Exception as e:
             self.app.call_from_thread(self._log, f"[dim]{ts}[/]  [red]Tick error: {e}[/]")
+
+    def _do_auto(self, intent, ts):
+        """Toggle auto-tick on/off, optionally set interval."""
+        toggle = intent.get("strategy_name")  # "on"/"off" stored here
+        interval = intent.get("qty")  # interval seconds stored here
+
+        if interval and interval >= 1:
+            self.auto_tick_interval = int(interval)
+
+        if toggle in ("off", "stop"):
+            self.auto_tick = False
+            self._log(f"[dim]{ts}[/]  [yellow]Auto-tick OFF[/]")
+        elif toggle in ("on", "start"):
+            self.auto_tick = True
+            self._log(f"[dim]{ts}[/]  [green]Auto-tick ON[/] every {self.auto_tick_interval}s")
+        elif not toggle and not interval:
+            # Toggle
+            self.auto_tick = not self.auto_tick
+            state = f"[green]ON[/] every {self.auto_tick_interval}s" if self.auto_tick else "[yellow]OFF[/]"
+            self._log(f"[dim]{ts}[/]  Auto-tick {state}")
+        else:
+            # Just changed interval
+            self.auto_tick = True
+            self._log(f"[dim]{ts}[/]  [green]Auto-tick ON[/] every {self.auto_tick_interval}s")
 
     # ── Trade commands ────────────────────────────────────
 

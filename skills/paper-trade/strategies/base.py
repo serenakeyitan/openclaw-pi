@@ -48,8 +48,10 @@ class Strategy:
         self.orders = []
         self.status = "pending"
         self.created_at = datetime.now(timezone.utc).isoformat()
+        self.started_at = ""
         self.last_tick = ""
         self.error_msg = ""
+        self.duration_minutes = config.get("duration_minutes", 0)
 
     # -- Order-ID tagging ---------------------------------------------------
 
@@ -131,6 +133,8 @@ class Strategy:
             "total_fills": self.total_fills,
             "orders": list(self.orders),
             "created_at": self.created_at,
+            "started_at": self.started_at,
+            "duration_minutes": self.duration_minutes,
             "last_tick": self.last_tick,
             "error_msg": self.error_msg,
             "config": dict(self.config),
@@ -154,6 +158,8 @@ class Strategy:
         obj.total_fills = data.get("total_fills", 0)
         obj.orders = list(data.get("orders", []))
         obj.created_at = data.get("created_at", "")
+        obj.started_at = data.get("started_at", "")
+        obj.duration_minutes = data.get("duration_minutes", 0)
         obj.last_tick = data.get("last_tick", "")
         obj.error_msg = data.get("error_msg", "")
         obj.config = dict(data.get("config", {}))
