@@ -391,7 +391,7 @@ def parse_intent(cmd, known_strategy_names=None):
 
 CSS = """
 Screen { background: #000000; color: #c8d6e5; scrollbar-size: 0 0; }
-* { scrollbar-size: 0 0; scrollbar-color: #000000; scrollbar-background: #000000; }
+* { scrollbar-color: #1a2332; scrollbar-background: #000000; }
 
 #title-bar {
     dock: top; height: 1;
@@ -416,11 +416,11 @@ Screen { background: #000000; color: #c8d6e5; scrollbar-size: 0 0; }
     background: #111111; color: #00d4aa; text-style: bold;
 }
 
-DataTable { height: 1fr; background: #000000; }
+DataTable { height: 1fr; background: #000000; scrollbar-size: 0 1; scrollbar-color: #1a2332; scrollbar-background: #000000; }
 DataTable > .datatable--header { background: #111111; color: #00d4aa; text-style: bold; }
 DataTable:focus { border: none; }
 
-RichLog { height: 1fr; background: #000000; padding: 0 1; scrollbar-size: 1 1; }
+RichLog { height: 1fr; background: #000000; padding: 0 1; scrollbar-size: 0 1; scrollbar-color: #1a2332; scrollbar-background: #000000; }
 
 #command-bar { dock: bottom; height: 2; background: #0c0c0c; padding: 0; }
 #cmd-input { background: #111111; color: #c8d6e5; border: none; }
@@ -858,25 +858,19 @@ class TradingTerminal(App):
     def _fetch_positions(self):
         try:
             positions = self.api.list_positions()
+            seen_syms = set()
             rows = []
             for p in positions:
-                # Detect which strategy owns this symbol
-                strat_name = "manual"
-                for s in self.sm.strategies.values():
-                    sp = s.get_positions()
-                    if p.symbol in sp:
-                        strat_name = s.name
-                        break
+                sym = p.symbol
+                seen_syms.add(sym)
 
                 price = float(p.current_price)
                 entry = float(p.avg_entry_price)
                 qty = float(p.qty)
 
                 # Override with live crypto price from our cache
-                sym = p.symbol
                 is_crypto = "/" in sym or sym in ("BTCUSD", "ETHUSD", "SOLUSD", "DOGEUSD")
                 if is_crypto:
-                    # Check watchlist cache for fresh price
                     for ws in self.watchlist:
                         ws_flat = ws.replace("/", "")
                         if ws_flat == sym and ws in self.prev_prices:
@@ -895,8 +889,28 @@ class TradingTerminal(App):
                     "value": value,
                     "pnl": pnl,
                     "pnl_pct": pnl_pct,
-                    "strategy": strat_name,
                 })
+
+            # Include strategy symbols not in current positions (e.g. scalper between trades)
+            for s in self.sm.strategies.values():
+                if s.status not in ("active", "paused"):
+                    continue
+                sp = s.get_positions()
+                strat_sym = sp.get("symbol", "")
+                pos_sym = strat_sym.replace("/", "")
+                if pos_sym and pos_sym not in seen_syms:
+                    seen_syms.add(pos_sym)
+                    price = self.prev_prices.get(strat_sym, 0)
+                    rows.append({
+                        "symbol": pos_sym,
+                        "qty": 0,
+                        "entry": 0,
+                        "price": price,
+                        "value": 0,
+                        "pnl": s.realized_pnl,
+                        "pnl_pct": 0,
+                    })
+
             self.app.call_from_thread(self._render_positions, rows)
         except Exception:
             pass
@@ -1080,15 +1094,15 @@ class TradingTerminal(App):
             c = "#00d4aa" if side == "BUY" else "#ff6b6b"
             price = fmt(o.filled_avg_price) if o.filled_avg_price else "mkt"
             return (f"[dim]{ts}[/]  [bold {c}]FILL {side}[/]  "
-                    f"[bold white]{o.symbol}[/] x{o.qty} @ {price}{strat}")
+                    f"[bold white]{o.symbol}[/] x{o.filled_qty or o.qty or '?'} @ {price}{strat}")
         elif o.status in ("accepted", "new"):
             side = o.side.upper()
             c = "#00d4aa" if side == "BUY" else "#ff6b6b"
             lim = fmt(o.limit_price) if o.limit_price else "mkt"
             return (f"[dim]{ts}[/]  [#f0c040]NEW[/]  [{c}]{side}[/] "
-                    f"[bold]{o.symbol}[/] x{o.qty} @ {lim} {o.type}{strat}")
+                    f"[bold]{o.symbol}[/] x{o.qty or '?'} @ {lim} {o.type}{strat}")
         elif o.status == "canceled":
-            return f"[dim]{ts}[/]  [dim]CANCEL {o.symbol} {o.side} x{o.qty}[/]{strat}"
+            return f"[dim]{ts}[/]  [dim]CANCEL {o.symbol} {o.side} x{o.qty or '?'}[/]{strat}"
         return None
 
     def _load_recent_orders(self):
