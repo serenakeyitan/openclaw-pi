@@ -950,7 +950,10 @@ class TradingTerminal(App):
             last_tick = s["last_tick"]
             if last_tick:
                 try:
-                    lt = datetime.fromisoformat(last_tick).strftime("%H:%M:%S")
+                    lt_dt = datetime.fromisoformat(last_tick)
+                    if lt_dt.tzinfo is not None:
+                        lt_dt = lt_dt.astimezone()
+                    lt = lt_dt.strftime("%H:%M:%S")
                 except Exception:
                     lt = last_tick[:8]
             else:
@@ -986,7 +989,7 @@ class TradingTerminal(App):
                         break
 
                 rows.append({
-                    "time": o.submitted_at.strftime("%m/%d %H:%M") if o.submitted_at else "---",
+                    "time": o.submitted_at.astimezone().strftime("%m/%d %H:%M") if o.submitted_at else "---",
                     "side": o.side,
                     "symbol": o.symbol,
                     "qty": str(o.qty or "---"),
@@ -1027,9 +1030,11 @@ class TradingTerminal(App):
             for o in orders:
                 if o.id not in new_ids:
                     continue
-                # Use the actual order timestamp from API
+                # Use the actual order timestamp from API, converted to local time
                 order_time = o.filled_at or o.updated_at or o.submitted_at
                 if order_time:
+                    if order_time.tzinfo is not None:
+                        order_time = order_time.astimezone()  # convert to local tz
                     ts = order_time.strftime("%m/%d %H:%M:%S")
                 else:
                     ts = datetime.now().strftime("%m/%d %H:%M:%S")
