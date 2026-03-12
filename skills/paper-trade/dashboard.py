@@ -400,7 +400,7 @@ Screen { background: #000000; color: #c8d6e5; scrollbar-size: 0 0; }
 }
 #account-bar { height: 1; background: #0c0c0c; padding: 0 1; }
 
-#tables-row { height: 13; }
+#tables-row { height: 9; }
 #watchlist-pane { width: 2fr; background: #000000; border-right: solid #1a2332; }
 #positions-pane { width: 3fr; background: #000000; }
 
@@ -408,7 +408,7 @@ Screen { background: #000000; color: #c8d6e5; scrollbar-size: 0 0; }
 #strat-left { width: 2fr; background: #000000; border-right: solid #1a2332; }
 #strat-right { width: 1fr; background: #000000; }
 
-#log-area { height: 1fr; min-height: 2; }
+#log-area { height: 1fr; min-height: 4; }
 #trades-pane { width: 1fr; background: #000000; }
 
 .pane-title {
@@ -422,7 +422,7 @@ DataTable:focus { border: none; }
 
 RichLog { height: 1fr; background: #000000; padding: 0 1; scrollbar-size: 1 1; }
 
-#command-bar { dock: bottom; height: 3; background: #0c0c0c; padding: 0 1; }
+#command-bar { dock: bottom; height: 2; background: #0c0c0c; padding: 0; }
 #cmd-input { background: #111111; color: #c8d6e5; border: none; }
 
 #status-line { dock: bottom; height: 1; background: #111111; color: #576a7e; padding: 0 1; }
@@ -514,21 +514,9 @@ class TradingTerminal(App):
         ot.cursor_type = "none"
         ot.add_columns("Time", "Side", "Symbol", "Qty", "Type", "Limit", "Status", "Strategy")
 
-        # Load previous trade log entries
-        if TRADE_LOG_PATH.exists():
-            try:
-                lines = TRADE_LOG_PATH.read_text().strip().split("\n")
-                # Show last 50 entries
-                for line in lines[-50:]:
-                    if line.strip():
-                        self.query_one("#trade-log", RichLog).write(f"[dim]{line.strip()}[/]")
-                if lines:
-                    self.query_one("#trade-log", RichLog).write("[dim]─── previous session ───[/]")
-            except Exception:
-                pass
-
-        self._log(f"[dim]{datetime.now().strftime('%m/%d %H:%M:%S')}[/]  Terminal started")
+        self._log(f"[dim]{datetime.now().strftime('%m/%d %H:%M:%S')}[/]  Terminal started — loading recent orders...")
         self.refresh_all()
+        self._load_history()
 
         self.set_interval(2, self.refresh_prices)
         self.set_interval(5, self.refresh_account)
@@ -597,6 +585,11 @@ class TradingTerminal(App):
         self.tick_count += 1
 
     # ── Data fetching ─────────────────────────────────────
+
+    @work(thread=True)
+    def _load_history(self):
+        """Load recent fills from API into the trading log on startup."""
+        self._load_recent_orders()
 
     @work(thread=True)
     def refresh_all(self):
@@ -1057,53 +1050,92 @@ class TradingTerminal(App):
                 Text(o["strategy"], style="cyan" if o["strategy"] != "manual" else "dim"),
             )
 
+    def _format_order_log(self, o):
+        """Format a single order into a log line (with markup)."""
+        order_time = o.filled_at or o.updated_at or o.submitted_at
+        if order_time:
+            try:
+                # pandas Timestamp needs .tz_convert, stdlib uses .astimezone
+                if hasattr(order_time, 'tz_convert'):
+                    order_time = order_time.tz_convert(None).to_pydatetime()
+                    from datetime import timezone as tz
+                    order_time = order_time.replace(tzinfo=tz.utc).astimezone()
+                elif order_time.tzinfo is not None:
+                    order_time = order_time.astimezone()
+                ts = order_time.strftime("%m/%d %H:%M:%S")
+            except Exception:
+                ts = str(order_time)[:19]
+        else:
+            ts = datetime.now().strftime("%m/%d %H:%M:%S")
+
+        cid = o.client_order_id or ""
+        strat = ""
+        for s in self.sm.strategies.values():
+            if cid.startswith(f"{s.type}_{s.name}_"):
+                strat = f" [cyan][{s.name}][/]"
+                break
+
+        if o.status == "filled":
+            side = o.side.upper()
+            c = "#00d4aa" if side == "BUY" else "#ff6b6b"
+            price = fmt(o.filled_avg_price) if o.filled_avg_price else "mkt"
+            return (f"[dim]{ts}[/]  [bold {c}]FILL {side}[/]  "
+                    f"[bold white]{o.symbol}[/] x{o.qty} @ {price}{strat}")
+        elif o.status in ("accepted", "new"):
+            side = o.side.upper()
+            c = "#00d4aa" if side == "BUY" else "#ff6b6b"
+            lim = fmt(o.limit_price) if o.limit_price else "mkt"
+            return (f"[dim]{ts}[/]  [#f0c040]NEW[/]  [{c}]{side}[/] "
+                    f"[bold]{o.symbol}[/] x{o.qty} @ {lim} {o.type}{strat}")
+        elif o.status == "canceled":
+            return f"[dim]{ts}[/]  [dim]CANCEL {o.symbol} {o.side} x{o.qty}[/]{strat}"
+        return None
+
+    def _load_recent_orders(self):
+        """Load recent filled orders into the log on startup."""
+        try:
+            orders = self.api.list_orders(status="all", limit=100)
+            self.last_order_ids = {o.id for o in orders}
+
+            fills = [o for o in orders if o.status == "filled"]
+            # Sort by filled_at timestamp (handle pandas Timestamp)
+            fills.sort(key=lambda o: str(o.filled_at or o.submitted_at or ""))
+            for o in fills[-30:]:
+                try:
+                    line = self._format_order_log(o)
+                    if line:
+                        self.app.call_from_thread(self._log, line)
+                except Exception as e:
+                    self.app.call_from_thread(
+                        self._log, f"[red]Log error: {e}[/]"
+                    )
+            count = len(fills)
+            self.app.call_from_thread(
+                self._log,
+                f"[dim]{datetime.now().strftime('%m/%d %H:%M:%S')}[/]  "
+                f"Loaded {min(count, 30)} of {count} recent fills"
+            )
+        except Exception as e:
+            self.app.call_from_thread(
+                self._log, f"[red]Failed to load orders: {e}[/]"
+            )
+
     def _poll_new_fills(self):
         try:
             orders = self.api.list_orders(status="all", limit=50)
             current_ids = {o.id for o in orders}
             new_ids = current_ids - self.last_order_ids
 
-            for o in orders:
-                if o.id not in new_ids:
-                    continue
-                # Use the actual order timestamp from API, converted to local time
-                order_time = o.filled_at or o.updated_at or o.submitted_at
-                if order_time:
-                    if order_time.tzinfo is not None:
-                        order_time = order_time.astimezone()  # convert to local tz
-                    ts = order_time.strftime("%m/%d %H:%M:%S")
-                else:
-                    ts = datetime.now().strftime("%m/%d %H:%M:%S")
-                cid = o.client_order_id or ""
-                strat = ""
-                for s in self.sm.strategies.values():
-                    if cid.startswith(f"{s.type}_{s.name}_"):
-                        strat = f" [cyan][{s.name}][/]"
-                        break
+            # Sort new orders oldest-first
+            new_orders = sorted(
+                [o for o in orders if o.id in new_ids],
+                key=lambda o: o.filled_at or o.updated_at or o.submitted_at or ""
+            )
 
-                if o.status == "filled":
-                    side = o.side.upper()
-                    c = "#00d4aa" if side == "BUY" else "#ff6b6b"
-                    price = fmt(o.filled_avg_price) if o.filled_avg_price else "mkt"
-                    self.app.call_from_thread(
-                        self._log,
-                        f"[dim]{ts}[/]  [bold {c}]FILL {side}[/]  "
-                        f"[bold white]{o.symbol}[/] x{o.qty} @ {price}{strat}"
-                    )
-                elif o.status in ("accepted", "new"):
-                    side = o.side.upper()
-                    c = "#00d4aa" if side == "BUY" else "#ff6b6b"
-                    lim = fmt(o.limit_price) if o.limit_price else "mkt"
-                    self.app.call_from_thread(
-                        self._log,
-                        f"[dim]{ts}[/]  [#f0c040]NEW[/]  [{c}]{side}[/] "
-                        f"[bold]{o.symbol}[/] x{o.qty} @ {lim} {o.type}{strat}"
-                    )
-                elif o.status == "canceled":
-                    self.app.call_from_thread(
-                        self._log,
-                        f"[dim]{ts}[/]  [dim]CANCEL {o.symbol} {o.side} x{o.qty}[/]{strat}"
-                    )
+            for o in new_orders:
+                line = self._format_order_log(o)
+                if line:
+                    self.app.call_from_thread(self._log, line)
 
             self.last_order_ids = current_ids
         except Exception:
