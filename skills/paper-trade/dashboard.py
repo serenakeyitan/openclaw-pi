@@ -397,19 +397,17 @@ Screen { background: #000000; color: #c8d6e5; scrollbar-size: 0 0; }
     background: #00d4aa; color: #000000; text-style: bold;
     padding: 0 1;
 }
-#account-bar { height: 3; background: #0c0c0c; padding: 0 1; }
+#account-bar { height: 1; background: #0c0c0c; padding: 0 1; }
 
-#tables-row { height: auto; max-height: 14; }
-#watchlist-pane { width: 1fr; background: #000000; border-right: solid #1a2332; }
-#positions-pane { width: 1fr; background: #000000; }
+#tables-row { height: 13; }
+#watchlist-pane { width: 2fr; background: #000000; border-right: solid #1a2332; }
+#positions-pane { width: 3fr; background: #000000; }
 
-#chart-display { height: 1fr; background: #000000; padding: 0 0; }
-
-#strat-area { height: auto; min-height: 4; max-height: 10; }
+#strat-area { height: 4; }
 #strat-left { width: 2fr; background: #000000; border-right: solid #1a2332; }
 #strat-right { width: 1fr; background: #000000; }
 
-#log-area { height: 1fr; min-height: 6; }
+#log-area { height: 1fr; min-height: 2; }
 #trades-pane { width: 1fr; background: #000000; }
 
 .pane-title {
@@ -421,7 +419,6 @@ DataTable { height: 1fr; background: #000000; }
 DataTable > .datatable--header { background: #111111; color: #00d4aa; text-style: bold; }
 DataTable > .datatable--cursor { background: #0a1a2a; }
 DataTable:focus > .datatable--cursor { background: #112233; }
-#watch-table { height: auto; max-height: 12; }
 
 RichLog { height: 1fr; background: #000000; padding: 0 1; scrollbar-size: 1 1; }
 
@@ -487,10 +484,8 @@ class TradingTerminal(App):
 
         with Horizontal(id="tables-row"):
             with Vertical(id="watchlist-pane"):
-                yield Static(" MARKET", classes="pane-title")
                 yield DataTable(id="watch-table")
             with Vertical(id="positions-pane"):
-                yield Static(" POSITIONS", classes="pane-title")
                 yield DataTable(id="pos-table")
 
         with Horizontal(id="strat-area"):
@@ -516,12 +511,12 @@ class TradingTerminal(App):
         # Watchlist columns
         wt = self.query_one("#watch-table", DataTable)
         wt.cursor_type = "row"
-        wt.add_columns("#", "Symbol", "Price", "Chg", "Bid", "Ask", "Trend")
+        wt.add_columns(" #", "MARKET", "Price", "Chg", "Trend")
 
         # Positions columns
         pt = self.query_one("#pos-table", DataTable)
         pt.cursor_type = "row"
-        pt.add_columns("Symbol", "Qty", "Entry", "Price", "Value", "P&L", "P&L%", "Trend")
+        pt.add_columns("POSITIONS", "Qty", "Price", "P&L", "P&L%")
 
         # Strategy columns
         st = self.query_one("#strat-table", DataTable)
@@ -656,13 +651,12 @@ class TradingTerminal(App):
         ss = "+" if strat_pnl >= 0 else ""
 
         self.query_one("#account-bar", Static).update(
-            f"\n"
-            f"  [bold white]EQUITY[/] [bold]{fmt(eq)}[/]   "
-            f"[dim]CASH[/] {fmt(cash)}   "
-            f"[dim]BP[/] {fmt(bp)}   "
-            f"[dim]DAY P&L[/] [{c}]{arr} {s}{fmt(pnl)} ({s}{pnl_pct:.2f}%)[/]   "
-            f"[dim]STRAT P&L[/] [{sc}]{ss}{fmt(strat_pnl)}[/]   "
-            f"[dim]CAPITAL DEPLOYED[/] {fmt(summary['total_used'])}/{fmt(summary['total_allocated'])}   "
+            f" [bold white]EQUITY[/] [bold]{fmt(eq)}[/]  "
+            f"[dim]CASH[/] {fmt(cash)}  "
+            f"[dim]BP[/] {fmt(bp)}  "
+            f"[dim]DAY[/] [{c}]{arr}{s}{fmt(pnl)} ({s}{pnl_pct:.2f}%)[/]  "
+            f"[dim]STRAT[/] [{sc}]{ss}{fmt(strat_pnl)}[/]  "
+            f"[dim]DEPLOYED[/] {fmt(summary['total_used'])}/{fmt(summary['total_allocated'])}  "
             f"[green]{status}[/]"
         )
 
@@ -718,7 +712,7 @@ class TradingTerminal(App):
             trend = spark_trend(self.mini_bars.get(sym, []))
             if price is None:
                 new_rows.append((Text(str(idx), style="dim"), Text(sym, style="bold"),
-                           *[Text("---", style="dim")]*4, trend))
+                           *[Text("---", style="dim")]*2, trend))
                 continue
             if chg > 0.001: ps, cs = "bold #00d4aa", "#00d4aa"
             elif chg < -0.001: ps, cs = "bold #ff6b6b", "#ff6b6b"
@@ -731,14 +725,16 @@ class TradingTerminal(App):
                 Text(sym, style="bold white"),
                 Text(fmt(price), style=ps),
                 Text(f"{arr}{chg*100:+.2f}%", style=cs),
-                Text(fmt(bid), style="cyan") if bid else Text("---", style="dim"),
-                Text(fmt(ask), style="cyan") if ask else Text("---", style="dim"),
                 trend,
             ))
         # Swap in one go — minimal blank time
         wt.clear()
         for r in new_rows:
             wt.add_row(*r)
+        try:
+            wt.move_cursor(row=0, column=0)
+        except Exception:
+            pass
 
     # ── Bars fetch (for sparklines) ─────────────────────────
 
@@ -762,7 +758,8 @@ class TradingTerminal(App):
                 pass
             all_syms = []
             for s in set(self.watchlist) | pos_syms | set(self.mini_bars.keys()):
-                if s.isalpha() and len(s) <= 5:
+                # Only equity symbols for bars API (skip crypto with "/" and options)
+                if s.isalpha() and 1 <= len(s) <= 5:
                     all_syms.append(s)
             if not all_syms:
                 return
@@ -836,7 +833,7 @@ class TradingTerminal(App):
         pt = self.query_one("#pos-table", DataTable)
         if not rows:
             pt.clear()
-            pt.add_row(Text("No positions", style="dim"), *[Text("")]*7)
+            pt.add_row(Text("No positions", style="dim"), *[Text("")]*4)
             return
 
         new_rows = []
@@ -853,24 +850,22 @@ class TradingTerminal(App):
             new_rows.append((
                 Text(display_sym, style="bold white"),
                 Text(f"{p['qty']:g}"),
-                Text(fmt(p["entry"]), style="dim"),
                 Text(fmt(p["price"]), style="bold white"),
-                Text(fmt(p["value"])),
                 Text(f"{a}{s}{fmt(pnl)}", style=c),
                 Text(f"{s}{pnl_pct:.2f}%", style=c),
-                spark_trend(self.mini_bars.get(p["symbol"], [])),
             ))
         tc = "#00d4aa" if total_pnl >= 0 else "#ff6b6b"
         ts = "+" if total_pnl >= 0 else ""
         new_rows.append((
-            Text("TOTAL", style="bold"), Text(""), Text(""), Text(""),
+            Text("TOTAL", style="bold"), Text(""),
             Text(fmt(total_val), style="bold white"),
             Text(f"{ts}{fmt(total_pnl)}", style=f"bold {tc}"),
-            Text(""), Text(""),
+            Text(""),
         ))
         pt.clear()
         for r in new_rows:
             pt.add_row(*r)
+        pt.scroll_home()
 
     def _fetch_strategies(self):
         # Reload from disk in case bot updated it
