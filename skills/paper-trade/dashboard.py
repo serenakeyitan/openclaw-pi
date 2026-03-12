@@ -1550,7 +1550,32 @@ def _reset_terminal():
 import atexit
 atexit.register(_reset_terminal)
 
+LOCK_PATH = Path(__file__).parent / ".dashboard.pid"
+
+def _acquire_lock():
+    """Ensure only one dashboard runs. Kill any existing instance."""
+    my_pid = os.getpid()
+    if LOCK_PATH.exists():
+        try:
+            old_pid = int(LOCK_PATH.read_text().strip())
+            if old_pid != my_pid:
+                os.kill(old_pid, 15)  # SIGTERM
+                import time; time.sleep(0.5)
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+    LOCK_PATH.write_text(str(my_pid))
+
+def _release_lock():
+    try:
+        if LOCK_PATH.exists() and LOCK_PATH.read_text().strip() == str(os.getpid()):
+            LOCK_PATH.unlink()
+    except Exception:
+        pass
+
+atexit.register(_release_lock)
+
 if __name__ == "__main__":
+    _acquire_lock()
     app = TradingTerminal()
     app.run()
     _reset_terminal()
