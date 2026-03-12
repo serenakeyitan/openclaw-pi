@@ -170,8 +170,26 @@ class Strategy:
     def _get_latest_price(self, api, symbol: str) -> float | None:
         """Fetch the latest trade price for *symbol*."""
         try:
+            # Crypto symbols contain "/" (e.g. BTC/USD)
+            if "/" in symbol:
+                return self._get_crypto_price(api, symbol)
             trade = api.get_latest_trade(symbol)
             return float(trade.price)
+        except Exception:
+            return None
+
+    def _get_crypto_price(self, api, symbol: str) -> float | None:
+        """Fetch latest crypto price via Alpaca crypto data API."""
+        try:
+            import requests
+            headers = {
+                "APCA-API-KEY-ID": api._key_id,
+                "APCA-API-SECRET-KEY": api._secret_key,
+            }
+            url = f"https://data.alpaca.markets/v1beta3/crypto/us/latest/trades?symbols={symbol}"
+            r = requests.get(url, headers=headers, timeout=5)
+            data = r.json()
+            return float(data["trades"][symbol]["p"])
         except Exception:
             return None
 

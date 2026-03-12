@@ -219,6 +219,9 @@ def parse_intent(cmd, known_strategy_names=None):
               "raw_args": list, "raw": str}
     """
     raw = cmd.strip()
+    # Strip leading / (the focus key often gets typed into the command)
+    if raw.startswith("/"):
+        raw = raw[1:].strip()
     lower = raw.lower()
     words = lower.split()
 
@@ -230,7 +233,7 @@ def parse_intent(cmd, known_strategy_names=None):
     }
 
     # ── Quit / Refresh ──
-    if lower in ("q", "quit", "exit", "/quit", "/exit", "bye", "done"):
+    if lower in ("q", "quit", "exit", "bye", "done"):
         result["action"] = "quit"
         return result
     if lower in ("r", "refresh", "update", "reload"):
@@ -241,7 +244,7 @@ def parse_intent(cmd, known_strategy_names=None):
         return result
 
     # ── Auto-tick ──
-    if re.match(r'^auto\b', lower) or re.match(r'^/auto\b', lower):
+    if re.match(r'^auto\b', lower):
         result["action"] = "auto"
         # Parse "auto off", "auto on", "auto 5", "auto on 5"
         m = re.search(r'\b(on|off|start|stop)\b', lower)
@@ -472,6 +475,7 @@ class TradingTerminal(App):
         self.tick_count = 0
         self.mini_bars = {}   # symbol -> list of {open,close,high,low} for sparklines
         self._shutting_down = False
+        self._market_open = False
         self.auto_tick = False
         self.auto_tick_interval = 10  # seconds
         self._tick_running = False
@@ -568,6 +572,7 @@ class TradingTerminal(App):
         dot = "●" if self.tick_count % 2 == 0 else "○"
         try:
             clock = self.api.get_clock()
+            self._market_open = clock.is_open
             mkt = "[green]OPEN[/]" if clock.is_open else "[red]CLOSED[/]"
         except Exception:
             mkt = "?"
@@ -663,13 +668,34 @@ class TradingTerminal(App):
 
     def _fetch_prices(self):
         rows = []
+        is_crypto = lambda s: "/" in s or s in ("BTCUSD", "ETHUSD", "SOLUSD", "DOGEUSD")
         for i, sym in enumerate(self.watchlist):
+            # Skip stock tickers when market is closed (crypto always updates)
+            if not self._market_open and not is_crypto(sym):
+                # Use cached price if available
+                prev = self.prev_prices.get(sym)
+                if prev:
+                    rows.append((i+1, sym, prev, 0, None, None, list(self.price_history.get(sym, []))))
+                else:
+                    rows.append((i+1, sym, None, 0, None, None, []))
+                continue
             try:
-                trade = self.api.get_latest_trade(sym)
-                quote = self.api.get_latest_quote(sym)
-                price = float(trade.price)
-                bid = float(quote.bid_price) if quote.bid_price else None
-                ask = float(quote.ask_price) if quote.ask_price else None
+                if is_crypto(sym):
+                    # Use crypto API for crypto symbols
+                    import requests
+                    cfg = json.loads(CONFIG_PATH.read_text())
+                    headers = {"APCA-API-KEY-ID": cfg["api_key"], "APCA-API-SECRET-KEY": cfg["secret_key"]}
+                    csym = sym if "/" in sym else f"{sym[:3]}/{sym[3:]}"
+                    r = requests.get(f"https://data.alpaca.markets/v1beta3/crypto/us/latest/trades?symbols={csym}", headers=headers, timeout=5)
+                    data = r.json()
+                    price = float(data["trades"][csym]["p"])
+                    bid, ask = None, None
+                else:
+                    trade = self.api.get_latest_trade(sym)
+                    quote = self.api.get_latest_quote(sym)
+                    price = float(trade.price)
+                    bid = float(quote.bid_price) if quote.bid_price else None
+                    ask = float(quote.ask_price) if quote.ask_price else None
 
                 if sym not in self.price_history:
                     self.price_history[sym] = deque(maxlen=30)

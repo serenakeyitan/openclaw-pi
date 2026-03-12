@@ -20,6 +20,7 @@ from strategies.dca import DCAStrategy
 from strategies.momentum import MomentumStrategy
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.dip_buyer import DipBuyerStrategy
+from strategies.momentum_scalper import MomentumScalperStrategy
 
 STATE_PATH = Path(__file__).parent / "strategies_state.json"
 LOG_PATH = Path(__file__).parent / "strategy_manager.log"
@@ -31,6 +32,7 @@ STRATEGY_REGISTRY = {
     "momentum": MomentumStrategy,
     "mean_reversion": MeanReversionStrategy,
     "dip_buyer": DipBuyerStrategy,
+    "momentum_scalper": MomentumScalperStrategy,
 }
 
 
