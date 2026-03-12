@@ -509,6 +509,11 @@ class TradingTerminal(App):
             )
 
     def on_mount(self):
+        # Disable mouse tracking — prevents escape sequence leaks in split terminals
+        import sys
+        sys.stdout.write("\033[?1000l\033[?1003l\033[?1006l\033[?1015l")
+        sys.stdout.flush()
+
         # Watchlist columns
         wt = self.query_one("#watch-table", DataTable)
         wt.cursor_type = "row"
