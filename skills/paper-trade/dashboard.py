@@ -449,7 +449,6 @@ class TradingTerminal(App):
         self.watchlist = load_watchlist()
         self.price_history = {}
         self.prev_prices = {}      # last known price (cache/fallback)
-        self._open_prices = {}     # session open price (first seen, for % change)
         self.last_order_ids = set()
         self.tick_count = 0
         self.mini_bars = {}   # symbol -> list of {open,close,high,low} for sparklines
@@ -541,7 +540,7 @@ class TradingTerminal(App):
         self.set_interval(1, self._auto_tick_check)
 
     def _auto_tick_check(self):
-        # Check for reload flag (touched by run.sh or Claude after edits)
+        # Check for reload flag (touched after edits)
         if RELOAD_FLAG.exists():
             try:
                 RELOAD_FLAG.unlink()
@@ -549,7 +548,9 @@ class TradingTerminal(App):
                 pass
             self._shutting_down = True
             self.workers.cancel_all()
-            self.exit(return_code=42)
+            # Force exit with code 42 — wrapper will restart us
+            import os
+            os._exit(42)
             return
         if not self.auto_tick or self._shutting_down or self._tick_running:
             return
@@ -680,50 +681,63 @@ class TradingTerminal(App):
             self._api_headers = {"APCA-API-KEY-ID": cfg["api_key"], "APCA-API-SECRET-KEY": cfg["secret_key"]}
         headers = self._api_headers
 
-        # Collect all prices into one dict
-        prices = {}
+        prices = {}      # sym -> latest price
+        day_chg = {}     # sym -> daily % change
 
-        # 1) Batch fetch all stock prices in ONE call (no retry storms)
+        # 1) Stock snapshots — gives latest price + previous close for real daily change
         stock_syms = [s for s in self.watchlist if not is_crypto(s)]
         if stock_syms:
             try:
-                url = f"https://data.alpaca.markets/v2/stocks/trades/latest?symbols={','.join(stock_syms)}&feed=iex"
+                url = f"https://data.alpaca.markets/v2/stocks/snapshots?symbols={','.join(stock_syms)}&feed=iex"
                 r = requests.get(url, headers=headers, timeout=10)
                 data = r.json()
-                for sym, trade in data.get("trades", {}).items():
-                    prices[sym] = float(trade["p"])
+                for sym, snap in data.items():
+                    prices[sym] = float(snap["latestTrade"]["p"])
+                    prev_close = float(snap["prevDailyBar"]["c"])
+                    if prev_close > 0:
+                        day_chg[sym] = (prices[sym] - prev_close) / prev_close
             except Exception:
                 pass
 
-        # 2) Overlay with position prices (includes after-hours, more current)
+        # 2) Position data — only use for crypto and symbols not in snapshot
         try:
             for p in self.api.list_positions():
                 sym = p.symbol
-                prices[sym] = float(p.current_price)
-                # Also map crypto position symbols (BTCUSD) to watchlist format (BTC/USD)
+                # Don't overwrite stock snapshot prices (IEX is more accurate for display)
+                if sym not in prices:
+                    prices[sym] = float(p.current_price)
+                if sym not in day_chg and p.change_today is not None:
+                    day_chg[sym] = float(p.change_today)
+                # Map crypto positions (BTCUSD -> BTC/USD)
                 if sym in ("BTCUSD", "ETHUSD", "SOLUSD", "DOGEUSD"):
                     wsym = f"{sym[:3]}/{sym[3:]}"
-                    prices[wsym] = float(p.current_price)
+                    if wsym not in prices:
+                        prices[wsym] = float(p.current_price)
+                    if wsym not in day_chg and p.change_today is not None:
+                        day_chg[wsym] = float(p.change_today)
         except Exception:
             pass
 
-        # 3) Fetch crypto prices (overrides position price if fresher)
+        # 3) Crypto live prices (freshest)
         crypto_syms = [s for s in self.watchlist if is_crypto(s)]
-        for sym in crypto_syms:
+        if crypto_syms:
             try:
-                csym = sym if "/" in sym else f"{sym[:3]}/{sym[3:]}"
-                r = requests.get(f"https://data.alpaca.markets/v1beta3/crypto/us/latest/trades?symbols={csym}", headers=headers, timeout=5)
+                csyms = [s if "/" in s else f"{s[:3]}/{s[3:]}" for s in crypto_syms]
+                url = f"https://data.alpaca.markets/v1beta3/crypto/us/latest/trades?symbols={','.join(csyms)}"
+                r = requests.get(url, headers=headers, timeout=5)
                 data = r.json()
-                prices[sym] = float(data["trades"][csym]["p"])
+                for sym in crypto_syms:
+                    csym = sym if "/" in sym else f"{sym[:3]}/{sym[3:]}"
+                    if csym in data.get("trades", {}):
+                        prices[sym] = float(data["trades"][csym]["p"])
             except Exception:
                 pass
 
-        # 4) Build rows — use last known price as fallback
+        # 4) Build rows with real daily change
         rows = []
         for i, sym in enumerate(self.watchlist):
             price = prices.get(sym)
 
-            # Fallback to last known price
             if price is None:
                 price = self.prev_prices.get(sym)
             if price is None:
@@ -734,14 +748,10 @@ class TradingTerminal(App):
                 self.price_history[sym] = deque(maxlen=30)
             self.price_history[sym].append(price)
 
-            # Track session open price (first seen) for % change reference
-            if sym not in self._open_prices:
-                self._open_prices[sym] = price
-            ref = self._open_prices[sym]
-            chg = (price - ref) / ref if ref else 0
-            abs_chg = price - ref
+            # Use real daily % change from API, not fake session-start change
+            chg = day_chg.get(sym, 0)
+            abs_chg = price * chg  # approximate $ change
 
-            # Cache last known price for fallback
             self.prev_prices[sym] = price
 
             rows.append((i+1, sym, price, chg, abs_chg, None, None, list(self.price_history[sym])))
