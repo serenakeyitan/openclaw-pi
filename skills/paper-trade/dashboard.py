@@ -467,7 +467,8 @@ class TradingTerminal(App):
         self.sm = StrategyManager()
         self.watchlist = load_watchlist()
         self.price_history = {}
-        self.prev_prices = {}
+        self.prev_prices = {}      # last known price (cache/fallback)
+        self._open_prices = {}     # session open price (first seen, for % change)
         self.last_order_ids = set()
         self.tick_count = 0
         self.mini_bars = {}   # symbol -> list of {open,close,high,low} for sparklines
@@ -661,70 +662,109 @@ class TradingTerminal(App):
         )
 
     def _fetch_prices(self):
-        rows = []
+        import requests
         is_crypto = lambda s: "/" in s or s in ("BTCUSD", "ETHUSD", "SOLUSD", "DOGEUSD")
-        for i, sym in enumerate(self.watchlist):
-            # Skip stock tickers when market is closed (crypto always updates)
-            if not self._market_open and not is_crypto(sym):
-                # Use cached price if available
-                prev = self.prev_prices.get(sym)
-                if prev:
-                    rows.append((i+1, sym, prev, 0, None, None, list(self.price_history.get(sym, []))))
-                else:
-                    rows.append((i+1, sym, None, 0, None, None, []))
-                continue
+
+        if not hasattr(self, '_api_headers'):
+            cfg = json.loads(CONFIG_PATH.read_text())
+            self._api_headers = {"APCA-API-KEY-ID": cfg["api_key"], "APCA-API-SECRET-KEY": cfg["secret_key"]}
+        headers = self._api_headers
+
+        # Collect all prices into one dict
+        prices = {}
+
+        # 1) Batch fetch all stock prices in ONE call (no retry storms)
+        stock_syms = [s for s in self.watchlist if not is_crypto(s)]
+        if stock_syms:
             try:
-                if is_crypto(sym):
-                    # Use crypto API for crypto symbols
-                    import requests
-                    cfg = json.loads(CONFIG_PATH.read_text())
-                    headers = {"APCA-API-KEY-ID": cfg["api_key"], "APCA-API-SECRET-KEY": cfg["secret_key"]}
-                    csym = sym if "/" in sym else f"{sym[:3]}/{sym[3:]}"
-                    r = requests.get(f"https://data.alpaca.markets/v1beta3/crypto/us/latest/trades?symbols={csym}", headers=headers, timeout=5)
-                    data = r.json()
-                    price = float(data["trades"][csym]["p"])
-                    bid, ask = None, None
-                else:
-                    trade = self.api.get_latest_trade(sym)
-                    quote = self.api.get_latest_quote(sym)
-                    price = float(trade.price)
-                    bid = float(quote.bid_price) if quote.bid_price else None
-                    ask = float(quote.ask_price) if quote.ask_price else None
-
-                if sym not in self.price_history:
-                    self.price_history[sym] = deque(maxlen=30)
-                self.price_history[sym].append(price)
-
-                prev = self.prev_prices.get(sym, price)
-                chg = (price - prev) / prev if prev else 0
-                self.prev_prices[sym] = price
-
-                rows.append((i+1, sym, price, chg, bid, ask, list(self.price_history[sym])))
+                url = f"https://data.alpaca.markets/v2/stocks/trades/latest?symbols={','.join(stock_syms)}&feed=iex"
+                r = requests.get(url, headers=headers, timeout=10)
+                data = r.json()
+                for sym, trade in data.get("trades", {}).items():
+                    prices[sym] = float(trade["p"])
             except Exception:
-                rows.append((i+1, sym, None, 0, None, None, []))
+                pass
+
+        # 2) Overlay with position prices (includes after-hours, more current)
+        try:
+            for p in self.api.list_positions():
+                sym = p.symbol
+                prices[sym] = float(p.current_price)
+                # Also map crypto position symbols (BTCUSD) to watchlist format (BTC/USD)
+                if sym in ("BTCUSD", "ETHUSD", "SOLUSD", "DOGEUSD"):
+                    wsym = f"{sym[:3]}/{sym[3:]}"
+                    prices[wsym] = float(p.current_price)
+        except Exception:
+            pass
+
+        # 3) Fetch crypto prices (overrides position price if fresher)
+        crypto_syms = [s for s in self.watchlist if is_crypto(s)]
+        for sym in crypto_syms:
+            try:
+                csym = sym if "/" in sym else f"{sym[:3]}/{sym[3:]}"
+                r = requests.get(f"https://data.alpaca.markets/v1beta3/crypto/us/latest/trades?symbols={csym}", headers=headers, timeout=5)
+                data = r.json()
+                prices[sym] = float(data["trades"][csym]["p"])
+            except Exception:
+                pass
+
+        # 4) Build rows — use last known price as fallback
+        rows = []
+        for i, sym in enumerate(self.watchlist):
+            price = prices.get(sym)
+
+            # Fallback to last known price
+            if price is None:
+                price = self.prev_prices.get(sym)
+            if price is None:
+                rows.append((i+1, sym, None, 0, 0, None, None, []))
+                continue
+
+            if sym not in self.price_history:
+                self.price_history[sym] = deque(maxlen=30)
+            self.price_history[sym].append(price)
+
+            # Track session open price (first seen) for % change reference
+            if sym not in self._open_prices:
+                self._open_prices[sym] = price
+            ref = self._open_prices[sym]
+            chg = (price - ref) / ref if ref else 0
+            abs_chg = price - ref
+
+            # Cache last known price for fallback
+            self.prev_prices[sym] = price
+
+            rows.append((i+1, sym, price, chg, abs_chg, None, None, list(self.price_history[sym])))
+
         self.app.call_from_thread(self._render_prices, rows)
 
     def _render_prices(self, rows):
         wt = self.query_one("#watch-table", DataTable)
         # Build new row data first
         new_rows = []
-        for idx, sym, price, chg, bid, ask, hist in rows:
+        for idx, sym, price, chg, abs_chg, bid, ask, hist in rows:
             trend = spark_trend(self.mini_bars.get(sym, []))
             if price is None:
                 new_rows.append((Text(str(idx), style="dim"), Text(sym, style="bold"),
                            *[Text("---", style="dim")]*2, trend))
                 continue
-            if chg > 0.001: ps, cs = "bold #00d4aa", "#00d4aa"
-            elif chg < -0.001: ps, cs = "bold #ff6b6b", "#ff6b6b"
+            if chg > 0.0001: ps, cs = "bold #00d4aa", "#00d4aa"
+            elif chg < -0.0001: ps, cs = "bold #ff6b6b", "#ff6b6b"
             else: ps, cs = "bold white", "dim"
 
             arr = delta_arrow(chg)
+            s = "+" if abs_chg >= 0 else ""
+            # Show $ change for large prices (crypto), % for stocks
+            if abs(price) >= 1000:
+                chg_text = f"{arr}{s}${abs_chg:,.0f}"
+            else:
+                chg_text = f"{arr}{chg*100:+.2f}%"
 
             new_rows.append((
                 Text(f"  {idx}", style="dim"),
                 Text(sym, style="bold white"),
                 Text(fmt(price), style=ps),
-                Text(f"{arr}{chg*100:+.2f}%", style=cs),
+                Text(chg_text, style=cs),
                 trend,
             ))
         # Swap in one go — minimal blank time
@@ -815,14 +855,33 @@ class TradingTerminal(App):
                         strat_name = s.name
                         break
 
+                price = float(p.current_price)
+                entry = float(p.avg_entry_price)
+                qty = float(p.qty)
+
+                # Override with live crypto price from our cache
+                sym = p.symbol
+                is_crypto = "/" in sym or sym in ("BTCUSD", "ETHUSD", "SOLUSD", "DOGEUSD")
+                if is_crypto:
+                    # Check watchlist cache for fresh price
+                    for ws in self.watchlist:
+                        ws_flat = ws.replace("/", "")
+                        if ws_flat == sym and ws in self.prev_prices:
+                            price = self.prev_prices[ws]
+                            break
+
+                value = qty * price
+                pnl = (price - entry) * qty
+                pnl_pct = (price - entry) / entry if entry else 0
+
                 rows.append({
-                    "symbol": p.symbol,
-                    "qty": float(p.qty),
-                    "entry": float(p.avg_entry_price),
-                    "price": float(p.current_price),
-                    "value": float(p.market_value),
-                    "pnl": float(p.unrealized_pl),
-                    "pnl_pct": float(p.unrealized_plpc),
+                    "symbol": sym,
+                    "qty": qty,
+                    "entry": entry,
+                    "price": price,
+                    "value": value,
+                    "pnl": pnl,
+                    "pnl_pct": pnl_pct,
                     "strategy": strat_name,
                 })
             self.app.call_from_thread(self._render_positions, rows)
